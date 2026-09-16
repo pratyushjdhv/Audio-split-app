@@ -1,0 +1,404 @@
+package com.audiosplit
+
+import android.Manifest
+import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.media.AudioDeviceCallback
+import android.media.AudioDeviceInfo
+import android.media.AudioManager
+import android.media.projection.MediaProjectionManager
+import android.os.Build
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.audiosplit.audio.AudioSpec
+import com.audiosplit.audio.OutputDevices
+import com.audiosplit.audio.ToneTester
+import com.audiosplit.ui.AudioSplitTheme
+import com.audiosplit.ui.DeviceRow
+import com.audiosplit.ui.LabelledSlider
+import com.audiosplit.ui.LevelMeter
+import com.audiosplit.ui.SectionCard
+import kotlin.math.roundToInt
+
+class MainActivity : ComponentActivity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContent {
+            AudioSplitTheme {
+                Surface(
+                    Modifier.fillMaxSize(),
+                    color = MaterialTheme.colorScheme.background,
+                ) {
+                    MirrorScreen()
+                }
+            }
+        }
+    }
+}
+
+private const val PREFS = "audiosplit"
+private const val KEY_DEVICE = "device_id"
+private const val KEY_DELAY = "delay_ms"
+private const val KEY_GAIN = "gain"
+private const val TONE_DURATION_MS = 6000
+
+@Composable
+private fun MirrorScreen() {
+    val context = LocalContext.current
+    val prefs = remember { context.getSharedPreferences(PREFS, Context.MODE_PRIVATE) }
+    val status by MirrorState.status.collectAsStateWithLifecycle()
+
+    var devices by remember { mutableStateOf(OutputDevices.list(context)) }
+    var selectedId by remember { mutableStateOf(prefs.getInt(KEY_DEVICE, -1)) }
+    var delayMs by remember { mutableStateOf(prefs.getInt(KEY_DELAY, 180).toFloat()) }
+    var gain by remember { mutableStateOf(prefs.getFloat(KEY_GAIN, 1f)) }
+    var toneResults by remember { mutableStateOf<List<ToneTester.Result>>(emptyList()) }
+    var toneRunning by remember { mutableStateOf(false) }
+    var micGranted by remember {
+        mutableStateOf(
+            context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+        )
+    }
+    var pendingStart by remember { mutableStateOf(false) }
+
+    // Keep the list live so plugging the dongle in mid-session just works.
+    DisposableEffect(Unit) {
+        val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        val callback = object : AudioDeviceCallback() {
+            override fun onAudioDevicesAdded(added: Array<out AudioDeviceInfo>?) {
+                devices = OutputDevices.list(context)
+            }
+
+            override fun onAudioDevicesRemoved(removed: Array<out AudioDeviceInfo>?) {
+                devices = OutputDevices.list(context)
+            }
+        }
+        am.registerAudioDeviceCallback(callback, null)
+        onDispose {
+            am.unregisterAudioDeviceCallback(callback)
+            ToneTester.stop()
+        }
+    }
+
+    // Default to the wired pair if we can spot one — that's the mirror target in the
+    // common case, since Bluetooth already owns the system default.
+    LaunchedEffect(devices) {
+        if (devices.none { it.id == selectedId }) {
+            selectedId = devices.firstOrNull { it.type in WIRED_TYPES }?.id
+                ?: devices.firstOrNull { it.isHeadphoneLike }?.id
+                ?: -1
+        }
+    }
+
+    val projectionManager = remember {
+        context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+    }
+    val projectionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        val data: Intent? = result.data
+        if (result.resultCode == android.app.Activity.RESULT_OK && data != null) {
+            MirrorService.start(context, result.resultCode, data, selectedId, delayMs.roundToInt(), gain)
+        } else {
+            MirrorState.error("Capture permission was declined, so there's nothing to mirror.")
+        }
+    }
+
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { result ->
+        micGranted = result[Manifest.permission.RECORD_AUDIO] ?: micGranted
+        if (pendingStart) {
+            pendingStart = false
+            if (micGranted) {
+                projectionLauncher.launch(projectionManager.createScreenCaptureIntent())
+            } else {
+                MirrorState.error(
+                    "AudioSplit needs the microphone permission. Android gates audio capture " +
+                        "behind it even though the mic itself is never opened."
+                )
+            }
+        }
+    }
+
+    fun persist() {
+        prefs.edit()
+            .putInt(KEY_DEVICE, selectedId)
+            .putInt(KEY_DELAY, delayMs.roundToInt())
+            .putFloat(KEY_GAIN, gain)
+            .apply()
+    }
+
+    LaunchedEffect(toneRunning) {
+        if (toneRunning) {
+            kotlinx.coroutines.delay(TONE_DURATION_MS + 300L)
+            toneRunning = false
+        }
+    }
+
+    val selected = devices.firstOrNull { it.id == selectedId }
+
+    Column(
+        Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(20.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        Text("AudioSplit", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+        Text(
+            "Play one thing, hear it on two headphones. Start whatever you're watching " +
+                "in its own app, then mirror the sound to the second pair.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+
+        StatusCard(status)
+
+        SectionCard("Step 1 — send the second copy to") {
+            if (devices.isEmpty()) {
+                Text("No outputs found. Plug in the dongle and connect the Bluetooth headset.")
+            }
+            devices.forEach { device ->
+                DeviceRow(
+                    label = device.label,
+                    detail = "id ${device.id}" + if (device.address.isNotEmpty()) " · ${device.address}" else "",
+                    selected = device.id == selectedId,
+                    enabled = !status.running,
+                    onSelect = { selectedId = device.id; persist() },
+                )
+            }
+            Text(
+                "Pick the pair that is NOT currently getting sound. Android already sends " +
+                    "everything to the Bluetooth headset, so this is normally the wired one.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+
+        SectionCard("Step 2 — check this device can do it") {
+            Text(
+                "Plays a low tone to the selected output and a high tone to the other " +
+                    "headphones at the same time. Two different tones in two different ears " +
+                    "means it works.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            OutlinedButton(
+                onClick = {
+                    if (toneRunning) {
+                        ToneTester.stop()
+                        toneRunning = false
+                    } else {
+                        val target = selectedId.let { OutputDevices.find(context, it) }
+                        val other = devices.firstOrNull { it.id != selectedId && it.isHeadphoneLike }
+                            ?.let { OutputDevices.find(context, it.id) }
+                        if (target == null) {
+                            MirrorState.error("Choose an output first.")
+                        } else {
+                            toneResults = emptyList()
+                            toneRunning = true
+                            val pairs = buildList {
+                                add(target to 440.0)
+                                if (other != null) add(other to 880.0)
+                            }
+                            ToneTester.start(pairs, durationMs = TONE_DURATION_MS) { results ->
+                                toneResults = results
+                            }
+                        }
+                    }
+                },
+                enabled = !status.running,
+            ) {
+                Text(if (toneRunning) "Stop tones" else "Test both outputs (6s)")
+            }
+            toneResults.forEach { result ->
+                val verdict = when {
+                    result.honored -> "routed correctly"
+                    result.routedTo == null -> "no routing reported"
+                    else -> "OVERRIDDEN → went to ${result.routedTo.label}"
+                }
+                Text(
+                    "${result.requested.label}: $verdict",
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = if (result.honored) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.error,
+                )
+            }
+        }
+
+        SectionCard("Step 3 — tune it while it plays") {
+            LabelledSlider(
+                label = "Delay on the mirrored side",
+                value = delayMs,
+                valueText = "${delayMs.roundToInt()} ms",
+                range = 0f..AudioSpec.MAX_DELAY_MS.toFloat(),
+                steps = (AudioSpec.MAX_DELAY_MS / 5) - 1,
+                hint = "Bluetooth runs behind the wire. Nudge this until both of you hear " +
+                    "lips and sound line up. Around 150-250 ms is typical.",
+                onChange = {
+                    delayMs = it
+                    persist()
+                    if (status.running) MirrorService.update(context, it.roundToInt(), gain)
+                },
+            )
+            LabelledSlider(
+                label = "Volume of the mirrored side",
+                value = gain,
+                valueText = "${(gain * 100).roundToInt()}%",
+                range = 0f..2f,
+                steps = 39,
+                hint = "Separate from the volume buttons, which move both headphones at once.",
+                onChange = {
+                    gain = it
+                    persist()
+                    if (status.running) MirrorService.update(context, delayMs.roundToInt(), it)
+                },
+            )
+        }
+
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Button(
+                onClick = {
+                    if (status.running) {
+                        MirrorService.stop(context)
+                    } else {
+                        ToneTester.stop()
+                        toneRunning = false
+                        val needed = buildList {
+                            if (!micGranted) add(Manifest.permission.RECORD_AUDIO)
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                                context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
+                                PackageManager.PERMISSION_GRANTED
+                            ) {
+                                add(Manifest.permission.POST_NOTIFICATIONS)
+                            }
+                        }
+                        if (needed.isEmpty()) {
+                            projectionLauncher.launch(projectionManager.createScreenCaptureIntent())
+                        } else {
+                            // The projection prompt has to wait until the permission dialog
+                            // is gone, or the second dialog never appears.
+                            pendingStart = true
+                            permissionLauncher.launch(needed.toTypedArray())
+                        }
+                    }
+                },
+                enabled = selected != null,
+                modifier = Modifier.widthIn(min = 160.dp),
+                colors = ButtonDefaults.buttonColors(),
+            ) {
+                Text(if (status.running) "Stop sharing" else "Start sharing")
+            }
+            Text(
+                if (selected != null) "→ ${selected.label}" else "No output selected",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+
+        Text(
+            "Android asks for screen-capture permission because that's the same permission " +
+                "that covers capturing audio. Nothing on screen is recorded or leaves the device.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(24.dp))
+    }
+}
+
+@Composable
+private fun StatusCard(status: MirrorStatus) {
+    SectionCard(if (status.running) "Sharing" else "Not sharing") {
+        if (status.running) {
+            Text(
+                "Mirroring to ${status.targetLabel}",
+                style = MaterialTheme.typography.bodyLarge,
+            )
+            when (status.verdict) {
+                RoutingVerdict.HONORED -> Text(
+                    "Routing confirmed by the system.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+
+                RoutingVerdict.OVERRIDDEN -> Text(
+                    "This device ignored the request and sent the copy to " +
+                        "${status.actualLabel}. Both people are hearing the same output — " +
+                        "per-track routing is blocked here.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+
+                RoutingVerdict.UNKNOWN -> Text(
+                    "Waiting for the system to report where the audio went…",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            LevelMeter(level = status.level, active = true)
+            Text(
+                if (status.level > 0.001f) "Receiving audio." else
+                    "Silent. If something is playing, that app blocks audio capture (Netflix and " +
+                        "friends do). Try the browser or a local file.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        } else {
+            Text(
+                "Start playback in the other app first, then come back and hit start.",
+                style = MaterialTheme.typography.bodyMedium,
+            )
+        }
+        status.error?.let {
+            Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+        }
+    }
+}
+
+private val WIRED_TYPES = setOf(
+    AudioDeviceInfo.TYPE_USB_HEADSET,
+    AudioDeviceInfo.TYPE_USB_DEVICE,
+    AudioDeviceInfo.TYPE_WIRED_HEADSET,
+    AudioDeviceInfo.TYPE_WIRED_HEADPHONES,
+)

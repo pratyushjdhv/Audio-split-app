@@ -1,0 +1,51 @@
+package com.audiosplit
+
+import com.audiosplit.audio.OutputDevice
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+
+/** Where the mirror's routing request ended up. */
+enum class RoutingVerdict { UNKNOWN, HONORED, OVERRIDDEN }
+
+data class MirrorStatus(
+    val running: Boolean = false,
+    val targetLabel: String? = null,
+    val verdict: RoutingVerdict = RoutingVerdict.UNKNOWN,
+    val actualLabel: String? = null,
+    val level: Float = 0f,
+    val error: String? = null,
+)
+
+/**
+ * Single source of truth shared between the foreground service (which owns the audio)
+ * and the UI (which only ever reads it). Deliberately a plain object rather than a bound
+ * service — there's exactly one mirror and exactly one screen.
+ */
+object MirrorState {
+    private val _status = MutableStateFlow(MirrorStatus())
+    val status: StateFlow<MirrorStatus> = _status.asStateFlow()
+
+    fun started(targetLabel: String) {
+        _status.value = MirrorStatus(running = true, targetLabel = targetLabel)
+    }
+
+    fun stopped() {
+        _status.value = _status.value.copy(running = false, level = 0f)
+    }
+
+    fun routing(honored: Boolean, actual: OutputDevice?) {
+        _status.value = _status.value.copy(
+            verdict = if (honored) RoutingVerdict.HONORED else RoutingVerdict.OVERRIDDEN,
+            actualLabel = actual?.label,
+        )
+    }
+
+    fun level(peak: Float) {
+        _status.value = _status.value.copy(level = peak)
+    }
+
+    fun error(message: String?) {
+        _status.value = _status.value.copy(error = message)
+    }
+}
