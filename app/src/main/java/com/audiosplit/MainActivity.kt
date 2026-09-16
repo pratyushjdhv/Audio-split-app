@@ -35,6 +35,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -46,6 +48,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.audiosplit.audio.AudioSpec
+import com.audiosplit.audio.OutputDevice
 import com.audiosplit.audio.OutputDevices
 import com.audiosplit.audio.ToneTester
 import com.audiosplit.ui.AudioSplitTheme
@@ -73,6 +76,8 @@ class MainActivity : ComponentActivity() {
 
 private const val PREFS = "audiosplit"
 private const val KEY_DEVICE = "device_id"
+private const val KEY_DEVICE_TYPE = "device_type"
+private const val KEY_DEVICE_ADDRESS = "device_address"
 private const val KEY_DELAY = "delay_ms"
 private const val KEY_GAIN = "gain"
 private const val TONE_DURATION_MS = 6000
@@ -84,9 +89,9 @@ private fun MirrorScreen() {
     val status by MirrorState.status.collectAsStateWithLifecycle()
 
     var devices by remember { mutableStateOf(OutputDevices.list(context)) }
-    var selectedId by remember { mutableStateOf(prefs.getInt(KEY_DEVICE, -1)) }
-    var delayMs by remember { mutableStateOf(prefs.getInt(KEY_DELAY, 180).toFloat()) }
-    var gain by remember { mutableStateOf(prefs.getFloat(KEY_GAIN, 1f)) }
+    var selectedId by remember { mutableIntStateOf(prefs.getInt(KEY_DEVICE, -1)) }
+    var delayMs by remember { mutableFloatStateOf(prefs.getInt(KEY_DELAY, 180).toFloat()) }
+    var gain by remember { mutableFloatStateOf(prefs.getFloat(KEY_GAIN, 1f)) }
     var toneResults by remember { mutableStateOf<List<ToneTester.Result>>(emptyList()) }
     var toneRunning by remember { mutableStateOf(false) }
     var micGranted by remember {
@@ -117,11 +122,40 @@ private fun MirrorScreen() {
 
     // Default to the wired pair if we can spot one — that's the mirror target in the
     // common case, since Bluetooth already owns the system default.
-    LaunchedEffect(devices) {
-        if (devices.none { it.id == selectedId }) {
-            selectedId = devices.firstOrNull { it.type in WIRED_TYPES }?.id
+    //
+    // Re-runs whenever the device list changes, but never while mirroring: moving the
+    // selection underneath a running mirror would disable the Stop button.
+    LaunchedEffect(devices, status.running) {
+        if (status.running) return@LaunchedEffect
+
+        // AudioDeviceInfo ids are handed out per connection and are not stable across
+        // reboots or replugs, so a bare saved id can resolve to a completely different
+        // device. Match on what actually identifies the hardware first.
+        val savedType = prefs.getInt(KEY_DEVICE_TYPE, -1)
+        val savedAddress = prefs.getString(KEY_DEVICE_ADDRESS, "").orEmpty()
+        val current = devices.firstOrNull { it.id == selectedId }
+        val byIdentity = devices.firstOrNull {
+            savedType != -1 && it.type == savedType &&
+                (savedAddress.isEmpty() || it.address == savedAddress)
+        }
+
+        val resolved = when {
+            // A wired pair just appeared and we're pointed at something else: the wired
+            // one is almost always what's wanted, so follow it back.
+            current != null && current.type !in WIRED_TYPES &&
+                devices.any { it.type in WIRED_TYPES } ->
+                devices.first { it.type in WIRED_TYPES }.id
+
+            current != null -> current.id
+            byIdentity != null -> byIdentity.id
+            else -> devices.firstOrNull { it.type in WIRED_TYPES }?.id
                 ?: devices.firstOrNull { it.isHeadphoneLike }?.id
                 ?: -1
+        }
+
+        if (resolved != selectedId) {
+            selectedId = resolved
+            devices.firstOrNull { it.id == resolved }?.let { persistDevice(prefs, it) }
         }
     }
 
@@ -156,12 +190,17 @@ private fun MirrorScreen() {
         }
     }
 
-    fun persist() {
+    fun persistTuning() {
         prefs.edit()
-            .putInt(KEY_DEVICE, selectedId)
             .putInt(KEY_DELAY, delayMs.roundToInt())
             .putFloat(KEY_GAIN, gain)
             .apply()
+    }
+
+    LaunchedEffect(delayMs, gain, status.running) {
+        if (!status.running) return@LaunchedEffect
+        kotlinx.coroutines.delay(50)
+        MirrorService.update(context, delayMs.roundToInt(), gain)
     }
 
     LaunchedEffect(toneRunning) {
@@ -200,7 +239,10 @@ private fun MirrorScreen() {
                     detail = "id ${device.id}" + if (device.address.isNotEmpty()) " · ${device.address}" else "",
                     selected = device.id == selectedId,
                     enabled = !status.running,
-                    onSelect = { selectedId = device.id; persist() },
+                    onSelect = {
+                        selectedId = device.id
+                        persistDevice(prefs, device)
+                    },
                 )
             }
             Text(
@@ -247,19 +289,39 @@ private fun MirrorScreen() {
             ) {
                 Text(if (toneRunning) "Stop tones" else "Test both outputs (6s)")
             }
-            toneResults.forEach { result ->
+            toneResults.filter { !it.isDefaultProbe }.forEach { result ->
                 val verdict = when {
                     result.honored -> "routed correctly"
                     result.routedTo == null -> "no routing reported"
                     else -> "OVERRIDDEN → went to ${result.routedTo.label}"
                 }
                 Text(
-                    "${result.requested.label}: $verdict",
+                    "${result.requested?.label}: $verdict",
                     style = MaterialTheme.typography.bodySmall,
                     fontFamily = FontFamily.Monospace,
                     color = if (result.honored) MaterialTheme.colorScheme.primary
                     else MaterialTheme.colorScheme.error,
                 )
+            }
+            // Per-track routing working is only half the question. The source app plays to
+            // the system default, so if that default IS the mirror target, both copies land
+            // in the same ears and the other person hears nothing.
+            toneResults.firstOrNull { it.isDefaultProbe }?.let { probe ->
+                val collides = probe.routedTo != null && probe.routedTo.id == selectedId
+                Text(
+                    "your apps currently play to: ${probe.routedTo?.label ?: "unknown"}",
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (collides) {
+                    Text(
+                        "That is the same output you picked to mirror to, so both copies " +
+                            "would go to one pair of headphones. Pick the other output.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
             }
         }
 
@@ -272,11 +334,8 @@ private fun MirrorScreen() {
                 steps = (AudioSpec.MAX_DELAY_MS / 5) - 1,
                 hint = "Bluetooth runs behind the wire. Nudge this until both of you hear " +
                     "lips and sound line up. Around 150-250 ms is typical.",
-                onChange = {
-                    delayMs = it
-                    persist()
-                    if (status.running) MirrorService.update(context, it.roundToInt(), gain)
-                },
+                onChange = { delayMs = it },
+                onChangeFinished = ::persistTuning,
             )
             LabelledSlider(
                 label = "Volume of the mirrored side",
@@ -285,11 +344,8 @@ private fun MirrorScreen() {
                 range = 0f..2f,
                 steps = 39,
                 hint = "Separate from the volume buttons, which move both headphones at once.",
-                onChange = {
-                    gain = it
-                    persist()
-                    if (status.running) MirrorService.update(context, delayMs.roundToInt(), it)
-                },
+                onChange = { gain = it },
+                onChangeFinished = ::persistTuning,
             )
         }
 
@@ -324,7 +380,10 @@ private fun MirrorScreen() {
                         }
                     }
                 },
-                enabled = selected != null,
+                // Must stay enabled while running: if the dongle is pulled mid-movie the
+                // selected device disappears, and a disabled Stop leaves a mirror that
+                // can only be killed from the notification.
+                enabled = status.running || selected != null,
                 modifier = Modifier.widthIn(min = 160.dp),
                 colors = ButtonDefaults.buttonColors(),
             ) {
@@ -394,6 +453,14 @@ private fun StatusCard(status: MirrorStatus) {
             Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
         }
     }
+}
+
+private fun persistDevice(prefs: android.content.SharedPreferences, device: OutputDevice) {
+    prefs.edit()
+        .putInt(KEY_DEVICE, device.id)
+        .putInt(KEY_DEVICE_TYPE, device.type)
+        .putString(KEY_DEVICE_ADDRESS, device.address)
+        .apply()
 }
 
 private val WIRED_TYPES = setOf(

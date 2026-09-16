@@ -94,17 +94,23 @@ class MirrorService : Service() {
         MirrorState.error(null)
         MirrorState.started(target.toOutputDevice().label)
 
-        engine = MirrorEngine(mp, target, object : MirrorEngine.Listener {
-            override fun onLevel(peak: Float) = MirrorState.level(peak)
+        try {
+            engine = MirrorEngine(mp, target, object : MirrorEngine.Listener {
+                override fun onLevel(peak: Float) = MirrorState.level(peak)
 
-            override fun onRouting(honored: Boolean, actual: OutputDevice?) =
-                MirrorState.routing(honored, actual)
+                override fun onRouting(honored: Boolean, actual: OutputDevice?) =
+                    MirrorState.routing(honored, actual)
 
-            override fun onError(message: String) {
-                MirrorState.error(message)
-                main.post { stopSelf() }
-            }
-        }).also { it.start(delayMs, gain) }
+                override fun onError(message: String) {
+                    MirrorState.error(message)
+                    main.post { stopSelf() }
+                }
+            }).also { it.start(delayMs, gain) }
+        } catch (t: Throwable) {
+            MirrorState.error("Could not start the mirror: ${t.message ?: t::class.java.simpleName}")
+            stopSelf()
+            return START_NOT_STICKY
+        }
 
         return START_STICKY
     }
@@ -128,7 +134,9 @@ class MirrorService : Service() {
         )
 
         val open = PendingIntent.getActivity(
-            this, 0, Intent(this, MainActivity::class.java),
+            this, 0,
+            Intent(this, MainActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
         val stop = PendingIntent.getService(

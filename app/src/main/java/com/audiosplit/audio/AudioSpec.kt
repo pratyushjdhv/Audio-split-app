@@ -1,5 +1,6 @@
 package com.audiosplit.audio
 
+import android.media.AudioAttributes
 import android.media.AudioFormat
 
 /**
@@ -21,6 +22,23 @@ object AudioSpec {
 
     const val MAX_DELAY_MS = 400
 
+    /**
+     * Floor on the buffered cushion. Below this the output starves on ordinary scheduler
+     * jitter, and 40ms is far under the threshold where anyone notices a lip-sync offset.
+     */
+    const val MIN_CUSHION_MS = 40
+
+    /**
+     * How far the buffer may wander from target before the drift loop corrects it.
+     * Must stay comfortably above one CHUNK_BYTES (~21ms): the playback side removes a
+     * whole chunk at a time, so a tighter band would trip on ordinary read granularity
+     * and correct against burstiness rather than against real drift.
+     */
+    const val DRIFT_TOLERANCE_MS = 40
+
+    /** Routing only settles once audio has actually been flowing for a while. */
+    const val ROUTING_SETTLE_MS = 400
+
     fun msToBytes(ms: Int): Int {
         val frames = (SAMPLE_RATE.toLong() * ms / 1000L).toInt()
         return frames * BYTES_PER_FRAME
@@ -30,6 +48,8 @@ object AudioSpec {
         val frames = bytes / BYTES_PER_FRAME
         return (frames.toLong() * 1000L / SAMPLE_RATE).toInt()
     }
+
+    fun alignToFrame(bytes: Int) = bytes - (bytes % BYTES_PER_FRAME)
 
     fun captureFormat(): AudioFormat = AudioFormat.Builder()
         .setEncoding(ENCODING)
@@ -41,5 +61,16 @@ object AudioSpec {
         .setEncoding(ENCODING)
         .setSampleRate(SAMPLE_RATE)
         .setChannelMask(OUT_CHANNEL_MASK)
+        .build()
+
+    /**
+     * Shared by the mirror and by the routing test on purpose: the test is only meaningful
+     * if it certifies byte-for-byte the same stream configuration the mirror will open.
+     * OEM effect stages can be bound to a specific content type and can override routing,
+     * so a test that passed with different attributes would prove nothing.
+     */
+    fun mirrorAttributes(): AudioAttributes = AudioAttributes.Builder()
+        .setUsage(AudioAttributes.USAGE_MEDIA)
+        .setContentType(AudioAttributes.CONTENT_TYPE_MOVIE)
         .build()
 }

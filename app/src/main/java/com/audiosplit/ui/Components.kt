@@ -88,6 +88,7 @@ fun LabelledSlider(
     steps: Int,
     hint: String? = null,
     onChange: (Float) -> Unit,
+    onChangeFinished: () -> Unit = {},
 ) {
     Column {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
@@ -99,7 +100,13 @@ fun LabelledSlider(
                 color = MaterialTheme.colorScheme.primary,
             )
         }
-        Slider(value = value, onValueChange = onChange, valueRange = range, steps = steps)
+        Slider(
+            value = value,
+            onValueChange = onChange,
+            onValueChangeFinished = onChangeFinished,
+            valueRange = range,
+            steps = steps,
+        )
         if (hint != null) {
             Text(
                 hint,

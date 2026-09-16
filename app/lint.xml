@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<lint>
+    <!--
+      Lint claims the -v26 qualifier is unnecessary at minSdk 29. It is not: AAPT2 will
+      not register an <adaptive-icon> root element from a resource folder without it, and
+      the build fails with "resource mipmap/ic_launcher not found". Verified by removing
+      the qualifier and watching processDebugMainManifest fail.
+    -->
+    <issue id="ObsoleteSdkInt">
+        <ignore path="src/main/res/mipmap-anydpi-v26" />
+    </issue>
+</lint>
