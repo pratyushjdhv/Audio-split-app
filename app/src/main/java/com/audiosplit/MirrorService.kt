@@ -49,6 +49,9 @@ class MirrorService : Service() {
                 engine?.let { e ->
                     if (intent.hasExtra(EXTRA_DELAY_MS)) e.delayMs = intent.getIntExtra(EXTRA_DELAY_MS, 0)
                     if (intent.hasExtra(EXTRA_GAIN)) e.gain = intent.getFloatExtra(EXTRA_GAIN, 1f)
+                    if (intent.hasExtra(EXTRA_AUTO_SYNC)) {
+                        e.autoSync = intent.getBooleanExtra(EXTRA_AUTO_SYNC, true)
+                    }
                 }
                 return START_STICKY
             }
@@ -72,6 +75,7 @@ class MirrorService : Service() {
         val deviceId = intent.getIntExtra(EXTRA_DEVICE_ID, -1)
         val delayMs = intent.getIntExtra(EXTRA_DELAY_MS, 0)
         val gain = intent.getFloatExtra(EXTRA_GAIN, 1f)
+        val autoSync = intent.getBooleanExtra(EXTRA_AUTO_SYNC, true)
 
         val target = OutputDevices.find(this, deviceId)
         if (data == null || target == null) {
@@ -101,14 +105,18 @@ class MirrorService : Service() {
                 override fun onRouting(honored: Boolean, actual: OutputDevice?) =
                     MirrorState.routing(honored, actual)
 
-                override fun onSync(excessMs: Int, resyncs: Int, outputLatencyMs: Int) =
-                    MirrorState.sync(excessMs, resyncs, outputLatencyMs)
+                override fun onSync(
+                    excessMs: Int,
+                    resyncs: Int,
+                    outputLatencyMs: Int,
+                    microTrims: Int,
+                ) = MirrorState.sync(excessMs, resyncs, outputLatencyMs, microTrims)
 
                 override fun onError(message: String) {
                     MirrorState.error(message)
                     main.post { stopSelf() }
                 }
-            }).also { it.start(delayMs, gain) }
+            }).also { it.autoSync = autoSync; it.start(delayMs, gain) }
         } catch (t: Throwable) {
             MirrorState.error("Could not start the mirror: ${t.message ?: t::class.java.simpleName}")
             stopSelf()
@@ -171,22 +179,33 @@ class MirrorService : Service() {
         const val EXTRA_DEVICE_ID = "device_id"
         const val EXTRA_DELAY_MS = "delay_ms"
         const val EXTRA_GAIN = "gain"
+        const val EXTRA_AUTO_SYNC = "auto_sync"
 
-        fun start(context: Context, resultCode: Int, data: Intent, deviceId: Int, delayMs: Int, gain: Float) {
+        fun start(
+            context: Context,
+            resultCode: Int,
+            data: Intent,
+            deviceId: Int,
+            delayMs: Int,
+            gain: Float,
+            autoSync: Boolean,
+        ) {
             val intent = Intent(context, MirrorService::class.java)
                 .putExtra(EXTRA_RESULT_CODE, resultCode)
                 .putExtra(EXTRA_RESULT_DATA, data)
                 .putExtra(EXTRA_DEVICE_ID, deviceId)
                 .putExtra(EXTRA_DELAY_MS, delayMs)
                 .putExtra(EXTRA_GAIN, gain)
+                .putExtra(EXTRA_AUTO_SYNC, autoSync)
             context.startForegroundService(intent)
         }
 
-        fun update(context: Context, delayMs: Int, gain: Float) {
+        fun update(context: Context, delayMs: Int, gain: Float, autoSync: Boolean) {
             val intent = Intent(context, MirrorService::class.java)
                 .setAction(ACTION_UPDATE)
                 .putExtra(EXTRA_DELAY_MS, delayMs)
                 .putExtra(EXTRA_GAIN, gain)
+                .putExtra(EXTRA_AUTO_SYNC, autoSync)
             context.startService(intent)
         }
 

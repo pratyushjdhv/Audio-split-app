@@ -22,6 +22,8 @@ data class MirrorStatus(
     val resyncs: Int = 0,
     /** Audio still queued in the output stack; -1 when the device won't report it. */
     val outputLatencyMs: Int = -1,
+    /** Inaudible 1 ms trims made to hold sync. */
+    val microTrims: Int = 0,
 )
 
 /**
@@ -55,9 +57,14 @@ object MirrorState {
         }
     }
 
-    fun sync(excessMs: Int, resyncs: Int, outputLatencyMs: Int) {
+    fun sync(excessMs: Int, resyncs: Int, outputLatencyMs: Int, microTrims: Int) {
         _status.update {
-            it.copy(excessMs = excessMs, resyncs = resyncs, outputLatencyMs = outputLatencyMs)
+            it.copy(
+                excessMs = excessMs,
+                resyncs = resyncs,
+                outputLatencyMs = outputLatencyMs,
+                microTrims = microTrims,
+            )
         }
     }
 

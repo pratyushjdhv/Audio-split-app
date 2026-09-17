@@ -59,7 +59,7 @@ class MirrorEngine(
          * means a backlog arrived. [outputLatencyMs] is how much audio is still in flight
          * inside the output stack, which is where slow lip-sync drift shows up.
          */
-        fun onSync(excessMs: Int, resyncs: Int, outputLatencyMs: Int)
+        fun onSync(excessMs: Int, resyncs: Int, outputLatencyMs: Int, microTrims: Int)
 
         fun onError(message: String)
     }
@@ -69,6 +69,10 @@ class MirrorEngine(
 
     @Volatile
     var gain: Float = 1.0f
+
+    /** Whether to hold sync automatically once you've set the delay by ear. */
+    @Volatile
+    var autoSync: Boolean = true
 
     @Volatile
     private var running = false
@@ -225,6 +229,7 @@ class MirrorEngine(
         var lastCheckNanos = startNanos
         var resyncDebtBytes = 0
         var resyncs = 0
+        var microTrims = 0
         var checks = 0
         var outputLatencyMs = -1
         val timestamp = AudioTimestamp()
@@ -307,9 +312,19 @@ class MirrorEngine(
                     // skipped. This is how far behind live the mirror has fallen.
                     val lagMs = (deliveredMs - elapsedMs - correctedMs).toInt()
                     if (lagMs > AudioSpec.BACKLOG_RESYNC_MS) {
+                        // A real break — a pause, a seek. Too big to trim away; take the
+                        // cut and be back in sync now.
                         resyncDebtBytes += AudioSpec.alignToFrame(AudioSpec.msToBytes(lagMs))
                         correctedMs += lagMs.toLong()
                         resyncs++
+                    } else if (autoSync && lagMs > AudioSpec.MICRO_DEADBAND_MS) {
+                        // Ordinary drift. Shave a millisecond and come back in 250 ms. Far
+                        // too small to hear, and because it repeats, the error never gets
+                        // the chance to grow into something that would need a jump.
+                        val trim = minOf(lagMs, AudioSpec.MICRO_CORRECT_MS)
+                        resyncDebtBytes += AudioSpec.alignToFrame(AudioSpec.msToBytes(trim))
+                        correctedMs += trim.toLong()
+                        microTrims++
                     } else if (lagMs < 0) {
                         // Capture delivered less than real time, which means the source
                         // simply wasn't playing. That is not credit to bank: left to
@@ -332,7 +347,7 @@ class MirrorEngine(
                             -1
                         }
                     }
-                    listener.onSync(lagMs, resyncs, outputLatencyMs)
+                    listener.onSync(lagMs, resyncs, outputLatencyMs, microTrims)
                 }
 
                 // Latched once, after enough audio has flowed for the route to settle.

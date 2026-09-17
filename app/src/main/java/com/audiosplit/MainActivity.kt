@@ -30,6 +30,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -81,6 +82,7 @@ private const val KEY_DEVICE_ADDRESS = "device_address"
 private const val KEY_USER_CHOSE = "device_user_chose"
 private const val KEY_DELAY = "delay_ms"
 private const val KEY_GAIN = "gain"
+private const val KEY_AUTO_SYNC = "auto_sync"
 private const val TONE_DURATION_MS = 6000
 
 @Composable
@@ -97,6 +99,7 @@ private fun MirrorScreen() {
         )
     }
     var gain by remember { mutableFloatStateOf(prefs.getFloat(KEY_GAIN, 1f)) }
+    var autoSync by remember { mutableStateOf(prefs.getBoolean(KEY_AUTO_SYNC, true)) }
     var toneResults by remember { mutableStateOf<List<ToneTester.Result>>(emptyList()) }
     var toneRunning by remember { mutableStateOf(false) }
     var micGranted by remember {
@@ -175,7 +178,10 @@ private fun MirrorScreen() {
     ) { result ->
         val data: Intent? = result.data
         if (result.resultCode == android.app.Activity.RESULT_OK && data != null) {
-            MirrorService.start(context, result.resultCode, data, selectedId, delayMs.roundToInt(), gain)
+            MirrorService.start(
+                context, result.resultCode, data, selectedId,
+                delayMs.roundToInt(), gain, autoSync,
+            )
         } else {
             MirrorState.error("Capture permission was declined, so there's nothing to mirror.")
         }
@@ -202,13 +208,14 @@ private fun MirrorScreen() {
         prefs.edit()
             .putInt(KEY_DELAY, delayMs.roundToInt())
             .putFloat(KEY_GAIN, gain)
+            .putBoolean(KEY_AUTO_SYNC, autoSync)
             .apply()
     }
 
-    LaunchedEffect(delayMs, gain, status.running) {
+    LaunchedEffect(delayMs, gain, autoSync, status.running) {
         if (!status.running) return@LaunchedEffect
         kotlinx.coroutines.delay(50)
-        MirrorService.update(context, delayMs.roundToInt(), gain)
+        MirrorService.update(context, delayMs.roundToInt(), gain, autoSync)
     }
 
     LaunchedEffect(toneRunning) {
@@ -356,6 +363,27 @@ private fun MirrorScreen() {
                 onChange = { gain = it },
                 onChangeFinished = ::persistTuning,
             )
+
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("Hold the sync automatically", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        "Trims a millisecond at a time so the delay you set by ear stays " +
+                            "put over a long film. Too small to hear. Turn it off if " +
+                            "anything sounds wrong and the mirror goes back to a plain copy.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(
+                    checked = autoSync,
+                    onCheckedChange = { autoSync = it; persistTuning() },
+                )
+            }
         }
 
         Row(
@@ -454,6 +482,7 @@ private fun StatusCard(status: MirrorStatus) {
                 buildString {
                     append("in output: ")
                     append(if (status.outputLatencyMs < 0) "n/a" else "${status.outputLatencyMs} ms")
+                    append("   ·   trims: ${status.microTrims}")
                     append("   ·   skipped forward: ${status.resyncs}x")
                     if (status.excessMs > 20) append("   ·   catching up ${status.excessMs} ms")
                 },

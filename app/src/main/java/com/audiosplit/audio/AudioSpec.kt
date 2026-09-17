@@ -33,15 +33,25 @@ object AudioSpec {
     const val BACKLOG_CHECK_MS = 250
 
     /**
-     * How far behind live the mirror may fall before it skips forward. Measured
-     * cumulatively since the mirror started, so a string of small backlogs that would each
-     * slip under the bar still adds up and gets corrected — that accumulation is what slow
-     * lip-sync drift actually is.
-     *
-     * In steady state capture and the wall clock both run at SAMPLE_RATE, so the total
-     * stays flat and this never fires.
+     * Lag beyond this is shed in one jump. Only for real breaks — a pause/resume, a seek —
+     * where the alternative is half a minute of visibly wrong sync. A cut is the lesser
+     * evil at this size; below it, MICRO_CORRECT_MS does the work inaudibly.
      */
-    const val BACKLOG_RESYNC_MS = 100
+    const val BACKLOG_RESYNC_MS = 150
+
+    /**
+     * Lag below this is left alone. Above it, the mirror trims MICRO_CORRECT_MS per check
+     * until it is back to zero.
+     */
+    const val MICRO_DEADBAND_MS = 8
+
+    /**
+     * How much the mirror may shave off per check to hold sync. At one millisecond per
+     * 250 ms this is a 0.4% rate change, which is below the threshold of hearing — the
+     * point of correcting continuously instead of waiting for the error to grow big enough
+     * to need a jump you would notice.
+     */
+    const val MICRO_CORRECT_MS = 1
 
     fun msToBytes(ms: Int): Int {
         val frames = (SAMPLE_RATE.toLong() * ms / 1000L).toInt()
