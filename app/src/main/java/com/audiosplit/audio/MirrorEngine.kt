@@ -61,6 +61,9 @@ class MirrorEngine(
          */
         fun onSync(excessMs: Int, resyncs: Int, outputLatencyMs: Int, microTrims: Int)
 
+        /** The capture stream was reopened after a gap, to clear a stale resume. */
+        fun onRestart(restarts: Int)
+
         fun onError(message: String)
     }
 
@@ -99,6 +102,12 @@ class MirrorEngine(
     /** How much silence we have injected, i.e. the delay currently in effect. */
     private var appliedDelayBytes = 0
 
+    // Lag bookkeeping, held here rather than in pump() so reopening the capture stream can
+    // reset the baseline it is measured against.
+    private var baseNanos = 0L
+    private var totalBytesRead = 0L
+    private var correctedMs = 0L
+
     /**
      * Opens both streams and starts mirroring. Never throws: the Builder APIs throw rather
      * than returning an uninitialised object when the device refuses a configuration, and
@@ -114,31 +123,7 @@ class MirrorEngine(
         var rec: AudioRecord? = null
         var trk: AudioTrack? = null
         try {
-            val captureConfig = AudioPlaybackCaptureConfiguration.Builder(projection)
-                .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
-                .addMatchingUsage(AudioAttributes.USAGE_GAME)
-                .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN)
-                // Without this we'd capture our own output and feed it back into itself.
-                .excludeUid(Process.myUid())
-                .build()
-
-            val minRecord = AudioRecord.getMinBufferSize(
-                AudioSpec.SAMPLE_RATE, AudioSpec.IN_CHANNEL_MASK, AudioSpec.ENCODING
-            )
-            // Capacity, not latency: the relay drains this as fast as the OS fills it, and
-            // the lag trimmer holds the steady-state occupancy near zero. Keeping it roomy
-            // costs nothing and absorbs a stall without losing audio.
-            val recordBytes = max(minRecord * 4, AudioSpec.msToBytes(250))
-
-            rec = AudioRecord.Builder()
-                .setAudioFormat(AudioSpec.captureFormat())
-                .setBufferSizeInBytes(recordBytes)
-                .setAudioPlaybackCaptureConfig(captureConfig)
-                .build()
-
-            if (rec.state != AudioRecord.STATE_INITIALIZED) {
-                throw IllegalStateException("capture stream did not initialise")
-            }
+            rec = buildCapture()
 
             val minTrack = AudioTrack.getMinBufferSize(
                 AudioSpec.SAMPLE_RATE, AudioSpec.OUT_CHANNEL_MASK, AudioSpec.ENCODING
@@ -192,6 +177,43 @@ class MirrorEngine(
         }
     }
 
+    /**
+     * Opens a fresh playback-capture stream. Separate from start() because the pump
+     * reopens it: after the source has been stopped for a while the existing stream can
+     * come back in a state that delivers badly, and no amount of massaging the samples
+     * fixes it — only a new stream does.
+     */
+    @SuppressLint("MissingPermission") // RECORD_AUDIO is checked before the service starts.
+    private fun buildCapture(): AudioRecord {
+        val captureConfig = AudioPlaybackCaptureConfiguration.Builder(projection)
+            .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
+            .addMatchingUsage(AudioAttributes.USAGE_GAME)
+            .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN)
+            // Without this we'd capture our own output and feed it back into itself.
+            .excludeUid(Process.myUid())
+            .build()
+
+        val minRecord = AudioRecord.getMinBufferSize(
+            AudioSpec.SAMPLE_RATE, AudioSpec.IN_CHANNEL_MASK, AudioSpec.ENCODING
+        )
+        // Capacity, not latency: the relay drains this as fast as the OS fills it, and the
+        // lag trimmer holds the steady-state occupancy near zero. Keeping it roomy costs
+        // nothing and absorbs a stall without losing audio.
+        val recordBytes = max(minRecord * 4, AudioSpec.msToBytes(250))
+
+        val rec = AudioRecord.Builder()
+            .setAudioFormat(AudioSpec.captureFormat())
+            .setBufferSizeInBytes(recordBytes)
+            .setAudioPlaybackCaptureConfig(captureConfig)
+            .build()
+
+        if (rec.state != AudioRecord.STATE_INITIALIZED) {
+            rec.release()
+            throw IllegalStateException("capture stream did not initialise")
+        }
+        return rec
+    }
+
     private fun describeStartFailure(t: Throwable) = when (t) {
         is UnsupportedOperationException ->
             "This device refused to open an audio capture stream. If you granted capture " +
@@ -219,7 +241,8 @@ class MirrorEngine(
         track = null
     }
 
-    private fun pump(rec: AudioRecord, trk: AudioTrack) {
+    private fun pump(initialRec: AudioRecord, trk: AudioTrack) {
+        var rec = initialRec
         Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
         // Smaller chunks mean the relay hands audio on sooner, at the cost of doing it
         // more often.
@@ -246,15 +269,17 @@ class MirrorEngine(
         // add 50-100ms, which no per-window test would ever flag, but they accumulate and
         // never come back on their own. That slow accumulation is exactly what gets
         // noticed as lip sync drifting an hour into a film.
-        val startNanos = System.nanoTime()
-        var totalBytesRead = 0L
-        var correctedMs = 0L
-        var lastCheckNanos = startNanos
+        baseNanos = System.nanoTime()
+        totalBytesRead = 0L
+        correctedMs = 0L
+        var lastCheckNanos = baseNanos
         var resyncDebtBytes = 0
         var resyncs = 0
         var microTrims = 0
         var checks = 0
         var outputLatencyMs = -1
+        var idleSinceNanos = 0L
+        var restarts = 0
         val timestamp = AudioTimestamp()
 
         try {
@@ -275,8 +300,39 @@ class MirrorEngine(
                     // the Bluetooth audio HAL and makes everything choppy for as long as
                     // the pause lasts. Yield instead; a few ms of latency while nothing is
                     // playing costs nothing.
+                    if (idleSinceNanos == 0L) idleSinceNanos = System.nanoTime()
                     Thread.sleep(IDLE_BACKOFF_MS)
                     continue
+                }
+
+                // Playback just came back after a long gap. Reopening the capture stream
+                // here is the whole fix: after a pause of any length the old stream tends
+                // to resume late and bursty, and trimming or skipping samples cannot undo
+                // that — the stream itself is the problem. This is the stop-and-start that
+                // was being done by hand, minus the hassle.
+                if (idleSinceNanos != 0L) {
+                    val idleMs = (System.nanoTime() - idleSinceNanos) / 1_000_000L
+                    idleSinceNanos = 0L
+                    if (idleMs >= AudioSpec.STALE_AFTER_IDLE_MS) {
+                        val fresh = runCatching {
+                            rec.runCatching { stop(); release() }
+                            buildCapture().also { it.startRecording() }
+                        }.getOrNull()
+                        if (fresh != null) {
+                            rec = fresh
+                            record = fresh
+                            // Drop whatever stale audio is still queued downstream, then
+                            // rebuild the delay from scratch against the new stream.
+                            trk.runCatching { pause(); flush(); play() }
+                            appliedDelayBytes = 0
+                            totalBytesRead = 0
+                            correctedMs = 0
+                            baseNanos = System.nanoTime()
+                            restarts++
+                            listener.onRestart(restarts)
+                            continue
+                        }
+                    }
                 }
 
                 totalBytesRead += read
@@ -330,7 +386,7 @@ class MirrorEngine(
                 if ((nowNanos - lastCheckNanos) / 1_000_000L >= AudioSpec.BACKLOG_CHECK_MS) {
                     lastCheckNanos = nowNanos
                     val deliveredMs = totalBytesRead / BYTES_PER_MS
-                    val elapsedMs = (nowNanos - startNanos) / 1_000_000L
+                    val elapsedMs = (nowNanos - baseNanos) / 1_000_000L
                     // Everything captured but not yet heard, minus what we've already
                     // skipped. This is how far behind live the mirror has fallen.
                     val lagMs = (deliveredMs - elapsedMs - correctedMs).toInt()

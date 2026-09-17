@@ -586,6 +586,7 @@ private fun StatusCard(status: MirrorStatus) {
                     append("in output: ")
                     append(if (status.outputLatencyMs < 0) "n/a" else "${status.outputLatencyMs} ms")
                     append("   ·   trims: ${status.microTrims}")
+                    if (status.restarts > 0) append("   ·   reopened: ${status.restarts}x")
                     append("   ·   skipped forward: ${status.resyncs}x")
                     if (status.excessMs > 20) append("   ·   catching up ${status.excessMs} ms")
                 },

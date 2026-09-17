@@ -24,6 +24,8 @@ data class MirrorStatus(
     val outputLatencyMs: Int = -1,
     /** Inaudible 1 ms trims made to hold sync. */
     val microTrims: Int = 0,
+    /** Times the capture stream was reopened after a gap. */
+    val restarts: Int = 0,
 )
 
 /**
@@ -66,6 +68,10 @@ object MirrorState {
                 microTrims = microTrims,
             )
         }
+    }
+
+    fun restarted(restarts: Int) {
+        _status.update { it.copy(restarts = restarts) }
     }
 
     fun level(peak: Float) {

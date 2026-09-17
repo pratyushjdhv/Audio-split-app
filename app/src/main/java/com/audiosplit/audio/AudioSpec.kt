@@ -22,6 +22,15 @@ object AudioSpec {
 
     const val MAX_DELAY_MS = 400
 
+    /**
+     * How long the source may be silent before the capture stream is reopened on resume.
+     * After a gap this long the existing stream frequently comes back delivering badly —
+     * late, bursty, and dropping — and nothing done to the samples afterwards recovers it.
+     * Reopening does, which is exactly what stopping and restarting the mirror by hand was
+     * doing.
+     */
+    const val STALE_AFTER_IDLE_MS = 1200
+
     /** Routing only settles once audio has actually been flowing for a while. */
     const val ROUTING_SETTLE_MS = 400
 

@@ -113,6 +113,8 @@ class MirrorService : Service() {
                     microTrims: Int,
                 ) = MirrorState.sync(excessMs, resyncs, outputLatencyMs, microTrims)
 
+                override fun onRestart(restarts: Int) = MirrorState.restarted(restarts)
+
                 override fun onError(message: String) {
                     MirrorState.error(message)
                     main.post { stopSelf() }
