@@ -225,6 +225,8 @@ class MirrorEngine(
         var lastCheckNanos = startNanos
         var resyncDebtBytes = 0
         var resyncs = 0
+        var checks = 0
+        var outputLatencyMs = -1
         val timestamp = AudioTimestamp()
 
         try {
@@ -238,7 +240,16 @@ class MirrorEngine(
                     }
                     break
                 }
-                if (read == 0) continue
+                if (read == 0) {
+                    // No data because nothing is playing — you paused the video. This
+                    // thread runs at THREAD_PRIORITY_URGENT_AUDIO, above the system's own
+                    // audio threads, so spinning here doesn't just waste a core: it starves
+                    // the Bluetooth audio HAL and makes everything choppy for as long as
+                    // the pause lasts. Yield instead; a few ms of latency while nothing is
+                    // playing costs nothing.
+                    Thread.sleep(IDLE_BACKOFF_MS)
+                    continue
+                }
 
                 totalBytesRead += read
 
@@ -308,16 +319,18 @@ class MirrorEngine(
                         correctedMs += lagMs.toLong()
                     }
 
-                    // How much audio is still queued inside the output stack. Sampled once
-                    // per check and only ever REPORTED — never fed back into a correction.
-                    // On A2DP this figure swings on every packet, and reacting to it per
-                    // chunk is exactly what made Bluetooth choppy.
-                    val outputLatencyMs = if (trk.getTimestamp(timestamp)) {
-                        val framesWritten = bytesWritten / AudioSpec.BYTES_PER_FRAME
-                        val inFlight = framesWritten - timestamp.framePosition
-                        (inFlight * 1000L / AudioSpec.SAMPLE_RATE).toInt().coerceIn(0, 10_000)
-                    } else {
-                        -1
+                    // How much audio is still queued inside the output stack. Only ever
+                    // REPORTED, never fed back into a correction: on A2DP this figure
+                    // swings on every packet, and reacting to it per chunk is exactly what
+                    // made Bluetooth choppy.
+                    if (checks++ % TIMESTAMP_EVERY_N_CHECKS == 0) {
+                        outputLatencyMs = if (trk.getTimestamp(timestamp)) {
+                            val framesWritten = bytesWritten / AudioSpec.BYTES_PER_FRAME
+                            val inFlight = framesWritten - timestamp.framePosition
+                            (inFlight * 1000L / AudioSpec.SAMPLE_RATE).toInt().coerceIn(0, 10_000)
+                        } else {
+                            -1
+                        }
                     }
                     listener.onSync(lagMs, resyncs, outputLatencyMs)
                 }
@@ -381,5 +394,11 @@ class MirrorEngine(
 
         /** Bytes of PCM per millisecond, for the lag arithmetic. */
         const val BYTES_PER_MS = (AudioSpec.SAMPLE_RATE / 1000) * AudioSpec.BYTES_PER_FRAME
+
+        /** Backoff when capture has nothing for us, so the loop never spins hot. */
+        const val IDLE_BACKOFF_MS = 5L
+
+        /** getTimestamp is a relatively costly call; sample it far less often than the lag. */
+        const val TIMESTAMP_EVERY_N_CHECKS = 4
     }
 }

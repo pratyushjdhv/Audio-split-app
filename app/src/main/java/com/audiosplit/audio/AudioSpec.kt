@@ -25,8 +25,12 @@ object AudioSpec {
     /** Routing only settles once audio has actually been flowing for a while. */
     const val ROUTING_SETTLE_MS = 400
 
-    /** How often the accumulated lag is evaluated. */
-    const val BACKLOG_CHECK_MS = 1000
+    /**
+     * How often the accumulated lag is evaluated. Short, because this is the delay between
+     * a resume going wrong and the mirror putting it right — a full second of it is most
+     * of what gets noticed.
+     */
+    const val BACKLOG_CHECK_MS = 250
 
     /**
      * How far behind live the mirror may fall before it skips forward. Measured
