@@ -126,8 +126,9 @@ class MirrorEngine(
             val minTrack = AudioTrack.getMinBufferSize(
                 AudioSpec.SAMPLE_RATE, AudioSpec.OUT_CHANNEL_MASK, AudioSpec.ENCODING
             )
-            // Deliberately tight. The delay cushion lives in the ring where we can measure
-            // it; buffer hidden inside AudioTrack is latency we cannot account for.
+            // Kept modest so the output stack holds little unaccounted latency. Not a
+            // suspect for the transition glitches: too small a buffer here would starve
+            // A2DP during steady playback too, and it doesn't.
             val trackBytes = max(minTrack, AudioSpec.msToBytes(80))
 
             trk = AudioTrack.Builder()
