@@ -1,101 +1,217 @@
 # AudioSplit
 
-Play something on one Android tablet, hear it on **two** headphones at once — one wired,
-one Bluetooth. Built for watching a movie with someone on a bus.
+**Watch one thing on one Android tablet, hear it on two headphones at once.**
+One wired pair, one Bluetooth pair. Built for watching a film with someone on a bus.
 
-Android has no built-in equivalent of Nahimic's dual-output feature, and Samsung's "Dual
-Audio" only pairs two *Bluetooth* devices. This app takes a different route.
+---
 
-## How it works
+## How to use it
 
-It is not a media player. It's a **system audio mirror**:
+### Before you start
 
-1. You start the movie in whatever app you normally use — Vivaldi, Stremio, a local
-   video/music player.
-2. That app plays to whatever Android picked as the default output. With a Bluetooth
-   headset connected, that's the Bluetooth headset.
-3. AudioSplit uses `AudioPlaybackCapture` to grab the same PCM stream the system is
-   playing, and writes a second copy to an `AudioTrack` pinned to the wired dongle via
-   `AudioTrack.setPreferredDevice()`.
+You need three things plugged in and working:
 
-Result: two people, two headphones, one video, no extra hardware.
+1. Your **Bluetooth headphones** — paired and connected
+2. The **wired earphones** — plugged into the USB-C dongle, dongle in the tablet
+3. The **video or music app** you want to watch in — browser, Stremio, a local player
+
+> Check you can hear sound normally first. If nothing is playing, AudioSplit has nothing
+> to copy.
+
+---
+
+### Step 1 — Pick where the second copy goes
+
+Open AudioSplit. You'll see a list of every output the tablet can see.
+
+**Pick the pair that is NOT currently getting sound.**
+
+Normally that's the **wired / USB-C** one, because Android automatically sends everything
+to Bluetooth as soon as it connects. AudioSplit pre-selects the wired pair for you, so
+usually you can just leave it alone.
+
+---
+
+### Step 2 — Test that your tablet can actually do this (do this once)
+
+Tap **Test both outputs (6s)**.
+
+You should hear, at the same time:
+
+| Where | What you should hear |
+| --- | --- |
+| The output you picked | a **low** tone |
+| The other headphones | a **high** tone |
+
+**Two different tones in two different ears = it works.** You're good forever; you never
+need to run this again.
+
+The app also prints a line saying **"your apps currently play to: …"**. That's where your
+video's sound is going right now. It should be the *other* pair — not the one you picked.
+If it names the same one you picked, the app will warn you, and you should pick the other
+output instead.
+
+**If both tones come out of the same ear**, or you see the word `OVERRIDDEN` in red, your
+tablet's software is refusing to send audio to two places at once. Nothing in the app can
+fix that — see [If the test fails](#if-the-test-fails) below.
+
+---
+
+### Step 3 — Start your video
+
+Go to your browser / Stremio / player and **start playing** something. Get the sound going
+first.
+
+---
+
+### Step 4 — Hit Start sharing
+
+Come back to AudioSplit and tap **Start sharing**.
+
+Android will ask for two permissions the first time:
+
+- **Microphone** — Android requires this for *any* audio capture. The app never opens the
+  mic. Say yes.
+- **Screen capture** — this is the permission that covers recording audio too. Nothing on
+  your screen is recorded or sent anywhere. Say yes.
+
+Both people should now hear the film.
+
+---
+
+### Step 5 — Line up the sound
+
+Bluetooth is slower than a wire — sound reaches the Bluetooth ears roughly a fifth of a
+second late. So the wired copy has to be held back to match.
+
+**Drag the "Delay on the mirrored side" slider until you both hear the same thing at the
+same moment.** It updates live while the film plays, so just nudge it until it sounds
+right. Around **180 ms** is a good starting point.
+
+The slider only needs setting once per pair of headphones — the app remembers it.
+
+There's also a **volume slider** for the mirrored side. Use it if one of you needs it
+louder than the other. (The tablet's volume buttons move *both* pairs together, which is
+why this exists separately.)
+
+---
+
+### When you're done
+
+Tap **Stop sharing**, or hit **Stop** on the notification.
+
+---
+
+## Quick troubleshooting
+
+| What you see | What it means |
+| --- | --- |
+| The level bar is flat while a video plays | That app blocks audio copying. Netflix, Prime Video and Disney+ all do this on purpose and there's no way around it. Use the browser, Stremio, or a local file. |
+| Sound is out of sync | Drag the delay slider (Step 5). |
+| One side is too quiet | Use the volume slider, not the volume buttons. |
+| Red `OVERRIDDEN` message | Your tablet refused to split the audio. See below. |
+| Both tones in the same ear during the test | Same thing — see below. |
+| Second pair went silent mid-film | Check the dongle didn't get knocked loose, then Stop and Start again. |
+
+---
 
 ## What works and what doesn't
 
-**Works:** browsers (Vivaldi, Chrome), Stremio, local video and MP3 players, most games
-and podcast apps — anything that doesn't explicitly opt out of audio capture.
+**Works:** browsers (Vivaldi, Chrome), Stremio, local video files, MP3s, podcasts, games —
+basically anything that doesn't deliberately block audio copying.
 
-**Doesn't work:** Netflix, Prime Video, Disney+ and other DRM-protected players. They set
-`ALLOW_CAPTURE_BY_NONE`, so the OS hands us silence. This is enforced below the app layer
-and there is no way around it short of a rooted device. The level meter on the main screen
-tells you immediately which case you're in: if it's flat while something is playing, that
-app is blocking capture.
+**Doesn't work:** Netflix, Prime Video, Disney+ and other paid streaming apps. They switch
+audio copying off at the system level for copyright reasons. This is enforced below the
+app, so no app can get around it. The level bar on the main screen tells you instantly:
+flat bar while something is playing means that app is blocking it.
 
-**The one real unknown:** `setPreferredDevice()` is a *request*. Whether a given ROM
-honours it for a device that isn't the current default is up to that ROM's audio policy,
-and OnePlus/Oppo/Xiaomi ROMs are not always cooperative. That's why there's a routing test
-built into step 2 — run it before trusting the app with movie night.
+---
 
-## First run
+## If the test fails
 
-1. Connect both headphones (Bluetooth paired and connected, dongle plugged in).
-2. Open AudioSplit. Pick the output that is **not** currently getting sound — normally the
-   wired/USB-C one, since Bluetooth wins the default.
-3. Hit **Test both outputs**. You should hear a low tone in one pair and a high tone in the
-   other, simultaneously. The app also prints what the system actually did with each
-   request.
-   - Two different tones in two different ears → you're good.
-   - Both tones in the same ear, or the app reports `OVERRIDDEN` → this ROM blocks
-     per-track routing. See *If routing is blocked* below.
-4. Start playback in your video app, come back, hit **Start sharing**, and grant the
-   capture permission.
-5. Slide **Delay** until the two of you hear the same thing at the same time.
+The app asks Android to send one sound stream to a specific pair of headphones. That's a
+*request*, and each manufacturer's software decides whether to honour it — OnePlus, Oppo
+and Xiaomi builds are not always cooperative. There's no way to know without testing,
+which is why the test is Step 2 rather than buried in a menu.
 
-## The delay slider
+If your tablet refuses, the fallback is to send the second audio stream over a local
+hotspot to the other person's phone, which plays it to their own earphones. That isn't
+built yet — it's a fair amount of work and it's only worth doing if the direct route
+actually fails, so run the test first.
 
-Bluetooth A2DP runs roughly 150–250 ms behind a wired connection. Video apps already
-compensate their picture for that, which means the wired copy arrives *early* and needs to
-be held back. That's what the slider does, and it's adjustable while playing because the
-only way to get it right is to nudge it until it sounds right. Start around 180 ms.
+---
 
-The separate volume slider exists because the hardware volume buttons move both outputs
-together — this one balances one pair against the other.
+## Installing it
 
-## If routing is blocked
+**From GitHub Actions:** go to the **Actions** tab → **Build APK** → newest run → download
+`audiosplit-debug-apk`. Unzip on the tablet and open the APK. You'll need to allow
+"install unknown apps" for whatever file manager you use.
 
-If the tone test shows `OVERRIDDEN`, the fallback is to stream the mirrored audio over a
-local hotspot to the second person's phone, which plays it to their own earphones. That
-isn't built yet — it's only worth writing if the direct path actually fails, so run the
-test first.
+> Actions has to be switched on for the repo first:
+> **Settings → Actions → General → Allow all actions**, then push anything.
 
-## Building
-
-CI builds a debug APK on every push: **Actions → Build APK → the newest run → download
-`audiosplit-debug-apk`**. Unzip it on the tablet and install (you'll need "install unknown
-apps" enabled for your file manager).
-
-Locally:
+**Building it yourself:**
 
 ```bash
-./gradlew assembleDebug   # or: gradle assembleDebug
+./gradlew assembleDebug
 ```
 
-Requires JDK 17 and an Android SDK with platform 35. minSdk is 29, because
-`AudioPlaybackCapture` landed in Android 10.
+Needs JDK 17 and an Android SDK with platform 35. The APK lands in
+`app/build/outputs/apk/debug/`.
 
-## Layout
+Minimum Android version is **10** — the audio-copying feature didn't exist before that.
 
-| Path | What's in it |
-| --- | --- |
-| `audio/AudioSpec.kt` | The single PCM format everything speaks (48 kHz stereo 16-bit) |
-| `audio/OutputDevices.kt` | Enumerating and labelling output devices |
-| `audio/MirrorEngine.kt` | Capture → delay → gain → routed output. The core loop. |
-| `audio/ToneTester.kt` | The dual-tone routing test |
-| `MirrorService.kt` | Foreground service holding the projection and the engine |
-| `MainActivity.kt` | The single screen |
+---
 
 ## Privacy
 
-Android asks for screen-capture permission because that's the same permission that gates
-audio capture; the app never creates a virtual display and never looks at the screen.
-Nothing is recorded and nothing leaves the device. There is no network code in it at all.
+No network code exists in this app at all. Nothing is recorded, nothing is stored, nothing
+leaves the tablet. The screen-capture permission is only there because Android bundles
+audio capture under it; the app never creates a screen capture and never looks at your
+display.
+
+---
+
+## For developers
+
+<details>
+<summary>How it actually works, and where the code lives</summary>
+
+It isn't a media player. It's a **system audio mirror**:
+
+1. The source app plays normally, to whatever Android picked as the default output.
+2. AudioSplit captures the same PCM stream via `AudioPlaybackCapture` (MediaProjection).
+3. It writes a second copy to an `AudioTrack` pinned to a chosen device with
+   `setPreferredDevice()`.
+
+Capture and playback run on separate threads either side of a ring buffer. That split is
+load-bearing: the ring's occupancy *is* the current latency, so the playback thread can
+measure and correct it. The two ends are clocked by different crystals — the system mixer
+on one side, the USB DAC's own on the other — and a few dozen ppm is enough to drift a
+two-hour film out of sync or overrun the buffer if nothing closes the loop.
+
+Three separate mechanisms, because the three problems have different shapes:
+
+- **Priming** builds the initial cushion. That cushion is the delay.
+- **Slider moves** apply as exact deltas, never re-derived from measured occupancy —
+  occupancy swings by a whole chunk (21 ms) between reads, so comparing it against a band
+  either ignores small moves or chases its own read granularity.
+- **Drift** is corrected against a one-second *average* occupancy, which is the only place
+  a tolerance band is meaningful.
+
+| Path | What's in it |
+| --- | --- |
+| `audio/AudioSpec.kt` | PCM format and the control-loop constants, with their invariants |
+| `audio/PcmRing.kt` | Ring buffer between the two audio threads |
+| `audio/MirrorEngine.kt` | Capture → delay → gain → routed output. The core. |
+| `audio/OutputDevices.kt` | Device enumeration and labelling |
+| `audio/ToneTester.kt` | The dual-tone routing test and the un-pinned probe |
+| `MirrorService.kt` | Foreground service owning the MediaProjection |
+| `MirrorState.kt` | StateFlow shared service → UI |
+| `MainActivity.kt` | The single screen |
+
+`MIN_CUSHION_MS > DRIFT_TOLERANCE_MS > one CHUNK_BYTES` is an invariant, not a
+coincidence. If the floor and the band are equal, an empty ring sits exactly on the band's
+low edge and the loop accepts zero occupancy as converged.
+
+</details>
