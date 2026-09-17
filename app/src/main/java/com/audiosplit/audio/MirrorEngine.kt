@@ -210,12 +210,18 @@ class MirrorEngine(
         // "sped up and choppy" actually is.
         //
         // Measured against the wall clock rather than against any buffer level: capture
-        // runs at SAMPLE_RATE, so over a long window delivered audio should equal elapsed
-        // time. Anything more is backlog, by definition. Deliberately NOT a reading of the
-        // output side — A2DP drains in bursts, and treating that as a signal is what broke
-        // Bluetooth before.
-        var windowStartNanos = System.nanoTime()
-        var windowBytes = 0L
+        // runs at SAMPLE_RATE, so delivered audio should equal elapsed time. Anything more
+        // is lag, by definition. Deliberately NOT a reading of the output side — A2DP
+        // drains in bursts, and treating that as a signal is what broke Bluetooth before.
+        //
+        // Kept as a running total since start, not per window. Each transition might only
+        // add 50-100ms, which no per-window test would ever flag, but they accumulate and
+        // never come back on their own. That slow accumulation is exactly what gets
+        // noticed as lip sync drifting an hour into a film.
+        val startNanos = System.nanoTime()
+        var totalBytesRead = 0L
+        var correctedMs = 0L
+        var lastCheckNanos = startNanos
         var resyncDebtBytes = 0
         var resyncs = 0
         val timestamp = AudioTimestamp()
@@ -233,7 +239,7 @@ class MirrorEngine(
                 }
                 if (read == 0) continue
 
-                windowBytes += read
+                totalBytesRead += read
 
                 var offset = 0
                 var length = read
@@ -281,19 +287,30 @@ class MirrorEngine(
                 }
 
                 val nowNanos = System.nanoTime()
-                val elapsedMs = (nowNanos - windowStartNanos) / 1_000_000L
-                if (elapsedMs >= AudioSpec.BACKLOG_WINDOW_MS) {
-                    val deliveredMs = AudioSpec.bytesToMs(windowBytes.coerceAtMost(Int.MAX_VALUE.toLong()).toInt())
-                    val excessMs = (deliveredMs - elapsedMs).toInt()
-                    if (excessMs > AudioSpec.BACKLOG_RESYNC_MS) {
-                        resyncDebtBytes += AudioSpec.alignToFrame(AudioSpec.msToBytes(excessMs))
+                if ((nowNanos - lastCheckNanos) / 1_000_000L >= AudioSpec.BACKLOG_CHECK_MS) {
+                    lastCheckNanos = nowNanos
+                    val deliveredMs = totalBytesRead / BYTES_PER_MS
+                    val elapsedMs = (nowNanos - startNanos) / 1_000_000L
+                    // Everything captured but not yet heard, minus what we've already
+                    // skipped. This is how far behind live the mirror has fallen.
+                    val lagMs = (deliveredMs - elapsedMs - correctedMs).toInt()
+                    if (lagMs > AudioSpec.BACKLOG_RESYNC_MS) {
+                        resyncDebtBytes += AudioSpec.alignToFrame(AudioSpec.msToBytes(lagMs))
+                        correctedMs += lagMs.toLong()
                         resyncs++
+                    } else if (lagMs < 0) {
+                        // Capture delivered less than real time, which means the source
+                        // simply wasn't playing. That is not credit to bank: left to
+                        // accumulate, a minute of paused video would push the total so far
+                        // negative that no real backlog could ever reach the threshold
+                        // again, silently disabling the correction for the whole session.
+                        correctedMs += lagMs.toLong()
                     }
-                    // How much audio is still queued inside the output stack. Sampled
-                    // once per window and only ever REPORTED — never fed back into a
-                    // correction. On A2DP this figure swings on every packet, and
-                    // reacting to it per chunk is exactly what made Bluetooth choppy.
-                    // Slow growth here is what lip-sync drift looks like.
+
+                    // How much audio is still queued inside the output stack. Sampled once
+                    // per check and only ever REPORTED — never fed back into a correction.
+                    // On A2DP this figure swings on every packet, and reacting to it per
+                    // chunk is exactly what made Bluetooth choppy.
                     val outputLatencyMs = if (trk.getTimestamp(timestamp)) {
                         val framesWritten = bytesWritten / AudioSpec.BYTES_PER_FRAME
                         val inFlight = framesWritten - timestamp.framePosition
@@ -301,9 +318,7 @@ class MirrorEngine(
                     } else {
                         -1
                     }
-                    listener.onSync(excessMs, resyncs, outputLatencyMs)
-                    windowStartNanos = nowNanos
-                    windowBytes = 0
+                    listener.onSync(lagMs, resyncs, outputLatencyMs)
                 }
 
                 // Latched once, after enough audio has flowed for the route to settle.
@@ -362,5 +377,8 @@ class MirrorEngine(
 
     private companion object {
         const val TAG = "MirrorEngine"
+
+        /** Bytes of PCM per millisecond, for the lag arithmetic. */
+        const val BYTES_PER_MS = (AudioSpec.SAMPLE_RATE / 1000) * AudioSpec.BYTES_PER_FRAME
     }
 }
