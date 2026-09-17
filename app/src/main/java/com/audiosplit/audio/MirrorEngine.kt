@@ -220,26 +220,35 @@ class MirrorEngine(
 
     /**
      * Drains the ring to the output device, holding the ring's occupancy at the requested
-     * delay. That single set-point does three jobs: it establishes the initial delay, it
-     * applies live changes from the slider, and it absorbs clock drift.
+     * delay.
      *
-     * The two are corrected on different timescales on purpose. A slider move is a step
-     * change the listener is actively waiting to hear, so it converges immediately. Drift
-     * is tens of ppm and only becomes audible over tens of minutes, so it is measured
-     * against a one-second *average* occupancy — an instantaneous sample swings by a whole
-     * chunk on every read and would have the loop chasing its own read granularity.
+     * Three mechanisms, because the three problems have genuinely different shapes:
+     *
+     *  - PRIMING builds the initial cushion before any audio flows. That cushion is the
+     *    delay.
+     *  - A SLIDER MOVE is applied as an exact delta, never by re-deriving from measured
+     *    occupancy. Occupancy swings by a whole chunk between reads, so any scheme that
+     *    compares it against a band either ignores small moves (a dead zone on the one
+     *    control the user tunes by ear) or chases its own read granularity. Applying the
+     *    delta makes every 5ms step produce exactly 5ms.
+     *  - DRIFT is tens of ppm between the capture clock and the DAC's own crystal, only
+     *    audible over tens of minutes. It is corrected against a one-second *average*
+     *    occupancy, which is what makes a band meaningful at all.
      */
     private fun playbackLoop(trk: AudioTrack) {
         Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
         val buf = ByteArray(AudioSpec.CHUNK_BYTES)
         val silence = ByteArray(AudioSpec.CHUNK_BYTES)
         val deadband = AudioSpec.msToBytes(AudioSpec.DRIFT_TOLERANCE_MS)
+        val resyncThreshold = AudioSpec.msToBytes(AudioSpec.SEEK_REARM_MS)
 
         var bytesWritten = 0L
         var lastRoutedId = Int.MIN_VALUE
         var sinceRoutingCheck = 0
         var lastTarget = -1
-        var seeking = true
+        var primed = false
+        /** Bytes still to be added (+) or removed (-) to honour a slider move or resync. */
+        var pendingAdjust = 0
         var occupancySum = 0L
         var occupancySamples = 0
         var sinceDriftCheck = 0
@@ -248,38 +257,55 @@ class MirrorEngine(
             while (running) {
                 val buffer = ring ?: break
                 val targetBytes = currentTargetBytes()
-                val occupancy = buffer.available
-
-                // A moved slider restarts the fast convergence path.
-                if (targetBytes != lastTarget) {
+                if (lastTarget < 0) {
                     lastTarget = targetBytes
-                    seeking = true
+                } else if (targetBytes != lastTarget) {
+                    pendingAdjust += targetBytes - lastTarget
+                    lastTarget = targetBytes
                 }
 
-                if (seeking) {
-                    val error = occupancy - targetBytes
-                    when {
-                        abs(error) <= deadband -> {
-                            seeking = false
-                            occupancySum = 0
-                            occupancySamples = 0
-                            sinceDriftCheck = 0
-                        }
-                        error > 0 -> buffer.discard(
-                            AudioSpec.alignToFrame(minOf(error, AudioSpec.CHUNK_BYTES))
-                        )
-                        else -> {
-                            bytesWritten += writeFully(
-                                trk, silence, 0,
-                                AudioSpec.alignToFrame(minOf(-error, AudioSpec.CHUNK_BYTES))
+                val occupancy = buffer.available
+
+                // Build the cushion before streaming anything. This is the delay.
+                if (!primed) {
+                    // Priming chases the absolute target, so a slider move made while it
+                    // runs is already accounted for — keeping the delta would double it.
+                    pendingAdjust = 0
+                    if (occupancy < targetBytes) {
+                        bytesWritten += writeFully(
+                            trk, silence, 0,
+                            AudioSpec.alignToFrame(
+                                minOf(targetBytes - occupancy, AudioSpec.CHUNK_BYTES)
                             )
-                            continue
-                        }
+                        )
+                        continue
                     }
+                    primed = true
+                }
+
+                // Apply a pending move a slice at a time; a single jump would be audible.
+                if (pendingAdjust > 0) {
+                    val slice = AudioSpec.alignToFrame(
+                        minOf(pendingAdjust, AudioSpec.CHUNK_BYTES)
+                    )
+                    if (slice > 0) {
+                        bytesWritten += writeFully(trk, silence, 0, slice)
+                        pendingAdjust -= slice
+                    } else {
+                        pendingAdjust = 0
+                    }
+                    continue
+                } else if (pendingAdjust < 0) {
+                    val slice = AudioSpec.alignToFrame(
+                        minOf(-pendingAdjust, AudioSpec.CHUNK_BYTES)
+                    )
+                    pendingAdjust += if (slice > 0) buffer.discard(slice) else -pendingAdjust
                 }
 
                 // Underrun guard: feed the DAC rather than let it run dry and click.
-                if (occupancy < AudioSpec.BYTES_PER_FRAME) {
+                // Triggers with a chunk still in hand, not at zero — by the time the ring
+                // is actually empty the output has already glitched.
+                if (occupancy < AudioSpec.CHUNK_BYTES) {
                     bytesWritten += writeFully(trk, silence, 0, CORRECTION_SLICE_BYTES)
                     continue
                 }
@@ -295,7 +321,7 @@ class MirrorEngine(
                 occupancySamples++
                 sinceDriftCheck += n
 
-                if (!seeking && sinceDriftCheck >= AudioSpec.msToBytes(DRIFT_CHECK_MS)) {
+                if (pendingAdjust == 0 && sinceDriftCheck >= AudioSpec.msToBytes(DRIFT_CHECK_MS)) {
                     sinceDriftCheck = 0
                     val average = if (occupancySamples > 0) {
                         (occupancySum / occupancySamples).toInt()
@@ -306,17 +332,17 @@ class MirrorEngine(
                     occupancySamples = 0
 
                     val error = average - targetBytes
-                    if (error > deadband) {
-                        // Output clock is slower than capture: shed the oldest audio.
-                        buffer.discard(
-                            AudioSpec.alignToFrame(minOf(error, CORRECTION_SLICE_BYTES))
-                        )
-                    } else if (error < -deadband) {
-                        // Output clock is faster: give it a little more to chew on.
-                        bytesWritten += writeFully(
-                            trk, silence, 0,
-                            AudioSpec.alignToFrame(minOf(-error, CORRECTION_SLICE_BYTES))
-                        )
+                    if (abs(error) > resyncThreshold) {
+                        // A real excursion — an overflow, or the output stalled. Correcting
+                        // this at the drift rate would leave it audible for a minute, so
+                        // schedule the whole difference as one adjustment.
+                        pendingAdjust = -error
+                    } else if (abs(error) > deadband) {
+                        pendingAdjust = -(if (error > 0) {
+                            minOf(error, CORRECTION_SLICE_BYTES)
+                        } else {
+                            maxOf(error, -CORRECTION_SLICE_BYTES)
+                        })
                     }
                 }
 
@@ -327,11 +353,14 @@ class MirrorEngine(
                     sinceRoutingCheck >= AudioSpec.msToBytes(ROUTING_CHECK_MS)
                 ) {
                     sinceRoutingCheck = 0
+                    // A null read means the route is in transition or the device just
+                    // went away — not that the ROM overrode us. Reporting it as an
+                    // override would blame the device for a jostled cable, on the one
+                    // diagnostic this whole app rests on.
                     val actual = trk.routedDevice
-                    val actualId = actual?.id ?: -1
-                    if (actualId != lastRoutedId) {
-                        lastRoutedId = actualId
-                        listener.onRouting(actualId == target.id, actual?.toOutputDevice())
+                    if (actual != null && actual.id != lastRoutedId) {
+                        lastRoutedId = actual.id
+                        listener.onRouting(actual.id == target.id, actual.toOutputDevice())
                     }
                 }
             }

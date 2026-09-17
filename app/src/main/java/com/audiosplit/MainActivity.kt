@@ -78,6 +78,7 @@ private const val PREFS = "audiosplit"
 private const val KEY_DEVICE = "device_id"
 private const val KEY_DEVICE_TYPE = "device_type"
 private const val KEY_DEVICE_ADDRESS = "device_address"
+private const val KEY_USER_CHOSE = "device_user_chose"
 private const val KEY_DELAY = "delay_ms"
 private const val KEY_GAIN = "gain"
 private const val TONE_DURATION_MS = 6000
@@ -90,7 +91,12 @@ private fun MirrorScreen() {
 
     var devices by remember { mutableStateOf(OutputDevices.list(context)) }
     var selectedId by remember { mutableIntStateOf(prefs.getInt(KEY_DEVICE, -1)) }
-    var delayMs by remember { mutableFloatStateOf(prefs.getInt(KEY_DELAY, 180).toFloat()) }
+    var delayMs by remember {
+        mutableFloatStateOf(
+            prefs.getInt(KEY_DELAY, 180)
+                .coerceIn(AudioSpec.MIN_CUSHION_MS, AudioSpec.MAX_DELAY_MS).toFloat()
+        )
+    }
     var gain by remember { mutableFloatStateOf(prefs.getFloat(KEY_GAIN, 1f)) }
     var toneResults by remember { mutableStateOf<List<ToneTester.Result>>(emptyList()) }
     var toneRunning by remember { mutableStateOf(false) }
@@ -123,16 +129,19 @@ private fun MirrorScreen() {
     // Default to the wired pair if we can spot one — that's the mirror target in the
     // common case, since Bluetooth already owns the system default.
     //
-    // Re-runs whenever the device list changes, but never while mirroring: moving the
-    // selection underneath a running mirror would disable the Stop button.
+    // Never runs while mirroring: moving the selection underneath a running mirror would
+    // disable its Stop button. And an explicit pick is never overridden — the earlier
+    // version re-applied the wired preference on every device-list change, which silently
+    // undid a deliberate choice of the Bluetooth side every time the mirror stopped.
     LaunchedEffect(devices, status.running) {
-        if (status.running) return@LaunchedEffect
+        if (status.running || devices.isEmpty()) return@LaunchedEffect
 
         // AudioDeviceInfo ids are handed out per connection and are not stable across
         // reboots or replugs, so a bare saved id can resolve to a completely different
-        // device. Match on what actually identifies the hardware first.
+        // device. Match on what actually identifies the hardware.
         val savedType = prefs.getInt(KEY_DEVICE_TYPE, -1)
         val savedAddress = prefs.getString(KEY_DEVICE_ADDRESS, "").orEmpty()
+        val userChose = prefs.getBoolean(KEY_USER_CHOSE, false)
         val current = devices.firstOrNull { it.id == selectedId }
         val byIdentity = devices.firstOrNull {
             savedType != -1 && it.type == savedType &&
@@ -140,22 +149,22 @@ private fun MirrorScreen() {
         }
 
         val resolved = when {
-            // A wired pair just appeared and we're pointed at something else: the wired
-            // one is almost always what's wanted, so follow it back.
-            current != null && current.type !in WIRED_TYPES &&
-                devices.any { it.type in WIRED_TYPES } ->
-                devices.first { it.type in WIRED_TYPES }.id
-
-            current != null -> current.id
-            byIdentity != null -> byIdentity.id
+            // An explicit pick stands for as long as that device is around...
+            userChose && current != null -> current.id
+            // ...and is re-found by identity after a replug or reboot renumbered it.
+            userChose && byIdentity != null -> byIdentity.id
             else -> devices.firstOrNull { it.type in WIRED_TYPES }?.id
+                ?: current?.id
+                ?: byIdentity?.id
                 ?: devices.firstOrNull { it.isHeadphoneLike }?.id
                 ?: -1
         }
 
         if (resolved != selectedId) {
             selectedId = resolved
-            devices.firstOrNull { it.id == resolved }?.let { persistDevice(prefs, it) }
+            // Record what we landed on for identity matching, but don't promote an
+            // automatic pick into a user choice.
+            devices.firstOrNull { it.id == resolved }?.let { persistDevice(prefs, it, userChose) }
         }
     }
 
@@ -241,7 +250,7 @@ private fun MirrorScreen() {
                     enabled = !status.running,
                     onSelect = {
                         selectedId = device.id
-                        persistDevice(prefs, device)
+                        persistDevice(prefs, device, userChose = true)
                     },
                 )
             }
@@ -330,8 +339,10 @@ private fun MirrorScreen() {
                 label = "Delay on the mirrored side",
                 value = delayMs,
                 valueText = "${delayMs.roundToInt()} ms",
-                range = 0f..AudioSpec.MAX_DELAY_MS.toFloat(),
-                steps = (AudioSpec.MAX_DELAY_MS / 5) - 1,
+                // Starts at the engine's cushion floor: anything below it is clamped
+                // away internally, so offering it would be a silently dead slider travel.
+                range = AudioSpec.MIN_CUSHION_MS.toFloat()..AudioSpec.MAX_DELAY_MS.toFloat(),
+                steps = ((AudioSpec.MAX_DELAY_MS - AudioSpec.MIN_CUSHION_MS) / 5) - 1,
                 hint = "Bluetooth runs behind the wire. Nudge this until both of you hear " +
                     "lips and sound line up. Around 150-250 ms is typical.",
                 onChange = { delayMs = it },
@@ -455,11 +466,16 @@ private fun StatusCard(status: MirrorStatus) {
     }
 }
 
-private fun persistDevice(prefs: android.content.SharedPreferences, device: OutputDevice) {
+private fun persistDevice(
+    prefs: android.content.SharedPreferences,
+    device: OutputDevice,
+    userChose: Boolean,
+) {
     prefs.edit()
         .putInt(KEY_DEVICE, device.id)
         .putInt(KEY_DEVICE_TYPE, device.type)
         .putString(KEY_DEVICE_ADDRESS, device.address)
+        .putBoolean(KEY_USER_CHOSE, userChose)
         .apply()
 }
 

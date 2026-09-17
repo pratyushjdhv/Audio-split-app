@@ -4,6 +4,7 @@ import com.audiosplit.audio.OutputDevice
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 
 /** Where the mirror's routing request ended up. */
 enum class RoutingVerdict { UNKNOWN, HONORED, OVERRIDDEN }
@@ -21,6 +22,11 @@ data class MirrorStatus(
  * Single source of truth shared between the foreground service (which owns the audio)
  * and the UI (which only ever reads it). Deliberately a plain object rather than a bound
  * service — there's exactly one mirror and exactly one screen.
+ *
+ * Mutators use update {} rather than assignment because the capture and playback threads
+ * both post here. A plain read-copy-write can drop a concurrent change, and the routing
+ * verdict is edge-triggered — it is only re-sent when the route actually changes, so
+ * losing it once loses it for the rest of the session.
  */
 object MirrorState {
     private val _status = MutableStateFlow(MirrorStatus())
@@ -31,21 +37,23 @@ object MirrorState {
     }
 
     fun stopped() {
-        _status.value = _status.value.copy(running = false, level = 0f)
+        _status.update { it.copy(running = false, level = 0f) }
     }
 
     fun routing(honored: Boolean, actual: OutputDevice?) {
-        _status.value = _status.value.copy(
-            verdict = if (honored) RoutingVerdict.HONORED else RoutingVerdict.OVERRIDDEN,
-            actualLabel = actual?.label,
-        )
+        _status.update {
+            it.copy(
+                verdict = if (honored) RoutingVerdict.HONORED else RoutingVerdict.OVERRIDDEN,
+                actualLabel = actual?.label,
+            )
+        }
     }
 
     fun level(peak: Float) {
-        _status.value = _status.value.copy(level = peak)
+        _status.update { it.copy(level = peak) }
     }
 
     fun error(message: String?) {
-        _status.value = _status.value.copy(error = message)
+        _status.update { it.copy(error = message) }
     }
 }
