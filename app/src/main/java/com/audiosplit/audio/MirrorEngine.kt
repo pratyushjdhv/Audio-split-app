@@ -286,6 +286,8 @@ class MirrorEngine(
         var outputLatencyMs = -1
         var idleSinceNanos = 0L
         var reportedIdle = false
+        var needsReopen = false
+        var lastBigSkipNanos = 0L
         var restarts = 0
         val timestamp = AudioTimestamp()
 
@@ -318,34 +320,38 @@ class MirrorEngine(
                     continue
                 }
 
-                // Playback just came back after a long gap. Reopening the capture stream
-                // here is the whole fix: after a pause of any length the old stream tends
-                // to resume late and bursty, and trimming or skipping samples cannot undo
-                // that — the stream itself is the problem. This is the stop-and-start that
-                // was being done by hand, minus the hassle.
+                // Playback just came back after a gap.
                 if (idleSinceNanos != 0L) {
                     val idleMs = (System.nanoTime() - idleSinceNanos) / 1_000_000L
                     idleSinceNanos = 0L
                     reportedIdle = false
-                    if (idleMs >= AudioSpec.STALE_AFTER_IDLE_MS) {
-                        val fresh = runCatching {
-                            rec.runCatching { stop(); release() }
-                            buildCapture().also { it.startRecording() }
-                        }.getOrNull()
-                        if (fresh != null) {
-                            rec = fresh
-                            record = fresh
-                            // Drop whatever stale audio is still queued downstream, then
-                            // rebuild the delay from scratch against the new stream.
-                            trk.runCatching { pause(); flush(); play() }
-                            appliedDelayBytes = 0
-                            totalBytesRead = 0
-                            correctedMs = 0
-                            baseNanos = System.nanoTime()
-                            restarts++
-                            listener.onRestart(restarts)
-                            continue
-                        }
+                    if (idleMs >= AudioSpec.STALE_AFTER_IDLE_MS) needsReopen = true
+                }
+
+                // Reopening the capture stream is the whole fix: after a gap, or an app
+                // handing over to another, the old stream tends to resume late and bursty,
+                // and trimming or skipping samples cannot undo that — the stream itself is
+                // what is wrong. This is the stop-and-start that was being done by hand.
+                if (needsReopen) {
+                    needsReopen = false
+                    val fresh = runCatching {
+                        rec.runCatching { stop(); release() }
+                        buildCapture().also { it.startRecording() }
+                    }.getOrNull()
+                    if (fresh != null) {
+                        rec = fresh
+                        record = fresh
+                        // Drop whatever stale audio is still queued downstream, then
+                        // rebuild the delay from scratch against the new stream.
+                        trk.runCatching { pause(); flush(); play() }
+                        appliedDelayBytes = 0
+                        totalBytesRead = 0
+                        correctedMs = 0
+                        baseNanos = System.nanoTime()
+                        lastBigSkipNanos = 0L
+                        restarts++
+                        listener.onRestart(restarts)
+                        continue
                     }
                 }
 
@@ -410,6 +416,14 @@ class MirrorEngine(
                         resyncDebtBytes += AudioSpec.alignToFrame(AudioSpec.msToBytes(lagMs))
                         correctedMs += lagMs.toLong()
                         resyncs++
+                        // Twice in quick succession means the audio isn't merely late, the
+                        // stream is unwell and will keep falling behind however much we
+                        // skip. Reopen it rather than cutting again every few seconds.
+                        val sinceLast = (nowNanos - lastBigSkipNanos) / 1_000_000L
+                        if (lastBigSkipNanos != 0L && sinceLast < AudioSpec.REPEAT_SKIP_WINDOW_MS) {
+                            needsReopen = true
+                        }
+                        lastBigSkipNanos = nowNanos
                     } else if (autoSync && lagMs > AudioSpec.MICRO_DEADBAND_MS) {
                         // Ordinary drift. Shave a millisecond and come back in 250 ms. Far
                         // too small to hear, and because it repeats, the error never gets

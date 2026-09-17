@@ -28,8 +28,19 @@ object AudioSpec {
      * late, bursty, and dropping — and nothing done to the samples afterwards recovers it.
      * Reopening does, which is exactly what stopping and restarting the mirror by hand was
      * doing.
+     *
+     * Short, because switching apps can hand over in well under a second and still leave
+     * the stream sick. There is no cost to being eager: while a video is playing the
+     * source holds its session continuously and feeds us zeros through quiet passages, so
+     * no data at all means no app is playing — never merely a quiet moment.
      */
-    const val STALE_AFTER_IDLE_MS = 1200
+    const val STALE_AFTER_IDLE_MS = 500
+
+    /**
+     * A second oversized lag correction within this window means skipping isn't working
+     * and the stream itself is the problem, so it gets reopened instead.
+     */
+    const val REPEAT_SKIP_WINDOW_MS = 5000
 
     /** Routing only settles once audio has actually been flowing for a while. */
     const val ROUTING_SETTLE_MS = 400
