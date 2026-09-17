@@ -5,6 +5,7 @@ import android.media.AudioAttributes
 import android.media.AudioDeviceInfo
 import android.media.AudioPlaybackCaptureConfiguration
 import android.media.AudioRecord
+import android.media.AudioTimestamp
 import android.media.AudioTrack
 import android.media.projection.MediaProjection
 import android.os.Process
@@ -51,6 +52,14 @@ class MirrorEngine(
 
         /** What the OS actually routed us to, vs what we asked for. Re-reported on change. */
         fun onRouting(honored: Boolean, actual: OutputDevice?)
+
+        /**
+         * Sync diagnostics, once per BACKLOG_WINDOW_MS.
+         * [excessMs] is captured audio minus wall-clock time over the window: positive
+         * means a backlog arrived. [outputLatencyMs] is how much audio is still in flight
+         * inside the output stack, which is where slow lip-sync drift shows up.
+         */
+        fun onSync(excessMs: Int, resyncs: Int, outputLatencyMs: Int)
 
         fun onError(message: String)
     }
@@ -193,6 +202,24 @@ class MirrorEngine(
         var sinceLevelReport = 0
         var bytesWritten = 0L
 
+        // Backlog tracking. When the source app stops and restarts — a Short ending, a
+        // track change — the capture side keeps buffering while this loop is parked in a
+        // blocking write. On resume that backlog arrives in a burst, and a relay that
+        // faithfully plays everything it is handed will play it late, then lose chunks to
+        // capture-buffer overrun. Dropped chunks jump the audio forward, which is what
+        // "sped up and choppy" actually is.
+        //
+        // Measured against the wall clock rather than against any buffer level: capture
+        // runs at SAMPLE_RATE, so over a long window delivered audio should equal elapsed
+        // time. Anything more is backlog, by definition. Deliberately NOT a reading of the
+        // output side — A2DP drains in bursts, and treating that as a signal is what broke
+        // Bluetooth before.
+        var windowStartNanos = System.nanoTime()
+        var windowBytes = 0L
+        var resyncDebtBytes = 0
+        var resyncs = 0
+        val timestamp = AudioTimestamp()
+
         try {
             while (running) {
                 val read = rec.read(buf, 0, buf.size)
@@ -206,8 +233,18 @@ class MirrorEngine(
                 }
                 if (read == 0) continue
 
+                windowBytes += read
+
                 var offset = 0
                 var length = read
+
+                // Skip forward through a backlog we already decided to shed.
+                if (resyncDebtBytes > 0) {
+                    val skip = AudioSpec.alignToFrame(minOf(resyncDebtBytes, length))
+                    offset += skip
+                    length -= skip
+                    resyncDebtBytes -= skip
+                }
 
                 // Converge on the requested delay a bit at a time. Jumping straight there
                 // would either overrun the capture buffer (injecting) or chop a word in
@@ -241,6 +278,32 @@ class MirrorEngine(
                         sinceLevelReport = 0
                         listener.onLevel(peak)
                     }
+                }
+
+                val nowNanos = System.nanoTime()
+                val elapsedMs = (nowNanos - windowStartNanos) / 1_000_000L
+                if (elapsedMs >= AudioSpec.BACKLOG_WINDOW_MS) {
+                    val deliveredMs = AudioSpec.bytesToMs(windowBytes.coerceAtMost(Int.MAX_VALUE.toLong()).toInt())
+                    val excessMs = (deliveredMs - elapsedMs).toInt()
+                    if (excessMs > AudioSpec.BACKLOG_RESYNC_MS) {
+                        resyncDebtBytes += AudioSpec.alignToFrame(AudioSpec.msToBytes(excessMs))
+                        resyncs++
+                    }
+                    // How much audio is still queued inside the output stack. Sampled
+                    // once per window and only ever REPORTED — never fed back into a
+                    // correction. On A2DP this figure swings on every packet, and
+                    // reacting to it per chunk is exactly what made Bluetooth choppy.
+                    // Slow growth here is what lip-sync drift looks like.
+                    val outputLatencyMs = if (trk.getTimestamp(timestamp)) {
+                        val framesWritten = bytesWritten / AudioSpec.BYTES_PER_FRAME
+                        val inFlight = framesWritten - timestamp.framePosition
+                        (inFlight * 1000L / AudioSpec.SAMPLE_RATE).toInt().coerceIn(0, 10_000)
+                    } else {
+                        -1
+                    }
+                    listener.onSync(excessMs, resyncs, outputLatencyMs)
+                    windowStartNanos = nowNanos
+                    windowBytes = 0
                 }
 
                 // Latched once, after enough audio has flowed for the route to settle.

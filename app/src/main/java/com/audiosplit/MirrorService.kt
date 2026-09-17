@@ -101,6 +101,9 @@ class MirrorService : Service() {
                 override fun onRouting(honored: Boolean, actual: OutputDevice?) =
                     MirrorState.routing(honored, actual)
 
+                override fun onSync(excessMs: Int, resyncs: Int, outputLatencyMs: Int) =
+                    MirrorState.sync(excessMs, resyncs, outputLatencyMs)
+
                 override fun onError(message: String) {
                     MirrorState.error(message)
                     main.post { stopSelf() }

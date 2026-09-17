@@ -445,6 +445,22 @@ private fun StatusCard(status: MirrorStatus) {
                 )
             }
             LevelMeter(level = status.level, active = true)
+
+            // Sync diagnostics. Worth surfacing because the two failure modes look
+            // identical from the sofa but have different causes: a jump in "skipped
+            // forward" is the mirror shedding a backlog (a video ending, a track change),
+            // while "in output" creeping up over time is lip-sync drift.
+            Text(
+                buildString {
+                    append("in output: ")
+                    append(if (status.outputLatencyMs < 0) "n/a" else "${status.outputLatencyMs} ms")
+                    append("   ·   skipped forward: ${status.resyncs}x")
+                    if (status.excessMs > 20) append("   ·   catching up ${status.excessMs} ms")
+                },
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
             Text(
                 if (status.level > 0.001f) "Receiving audio." else
                     "Silent. If something is playing, that app blocks audio capture (Netflix and " +

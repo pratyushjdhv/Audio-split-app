@@ -25,6 +25,21 @@ object AudioSpec {
     /** Routing only settles once audio has actually been flowing for a while. */
     const val ROUTING_SETTLE_MS = 400
 
+    /**
+     * Window over which captured audio is compared against the wall clock to spot a
+     * backlog. Long on purpose: the comparison only has to be right about a burst, and a
+     * long window makes it immune to ordinary per-chunk jitter.
+     */
+    const val BACKLOG_WINDOW_MS = 2000
+
+    /**
+     * How much more audio than wall-clock time has to arrive before we treat it as a
+     * backlog and skip forward. In steady state capture and the clock both run at
+     * SAMPLE_RATE, so the excess sits at ~0 — this is orders of magnitude above the noise
+     * floor and cannot fire during normal playback.
+     */
+    const val BACKLOG_RESYNC_MS = 120
+
     fun msToBytes(ms: Int): Int {
         val frames = (SAMPLE_RATE.toLong() * ms / 1000L).toInt()
         return frames * BYTES_PER_FRAME

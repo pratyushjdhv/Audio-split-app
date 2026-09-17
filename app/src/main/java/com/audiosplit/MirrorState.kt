@@ -16,6 +16,12 @@ data class MirrorStatus(
     val actualLabel: String? = null,
     val level: Float = 0f,
     val error: String? = null,
+    /** Captured audio minus elapsed time over the last window; positive means a backlog. */
+    val excessMs: Int = 0,
+    /** How many times the mirror has skipped forward to shed a backlog. */
+    val resyncs: Int = 0,
+    /** Audio still queued in the output stack; -1 when the device won't report it. */
+    val outputLatencyMs: Int = -1,
 )
 
 /**
@@ -46,6 +52,12 @@ object MirrorState {
                 verdict = if (honored) RoutingVerdict.HONORED else RoutingVerdict.OVERRIDDEN,
                 actualLabel = actual?.label,
             )
+        }
+    }
+
+    fun sync(excessMs: Int, resyncs: Int, outputLatencyMs: Int) {
+        _status.update {
+            it.copy(excessMs = excessMs, resyncs = resyncs, outputLatencyMs = outputLatencyMs)
         }
     }
 
