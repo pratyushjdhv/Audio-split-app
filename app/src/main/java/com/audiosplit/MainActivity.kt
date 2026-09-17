@@ -83,6 +83,7 @@ private const val KEY_USER_CHOSE = "device_user_chose"
 private const val KEY_DELAY = "delay_ms"
 private const val KEY_GAIN = "gain"
 private const val KEY_AUTO_SYNC = "auto_sync"
+private const val KEY_LOW_LATENCY = "low_latency"
 private const val TONE_DURATION_MS = 6000
 
 @Composable
@@ -100,6 +101,7 @@ private fun MirrorScreen() {
     }
     var gain by remember { mutableFloatStateOf(prefs.getFloat(KEY_GAIN, 1f)) }
     var autoSync by remember { mutableStateOf(prefs.getBoolean(KEY_AUTO_SYNC, true)) }
+    var lowLatency by remember { mutableStateOf(prefs.getBoolean(KEY_LOW_LATENCY, false)) }
     var toneResults by remember { mutableStateOf<List<ToneTester.Result>>(emptyList()) }
     var toneRunning by remember { mutableStateOf(false) }
     var micGranted by remember {
@@ -180,7 +182,7 @@ private fun MirrorScreen() {
         if (result.resultCode == android.app.Activity.RESULT_OK && data != null) {
             MirrorService.start(
                 context, result.resultCode, data, selectedId,
-                delayMs.roundToInt(), gain, autoSync,
+                delayMs.roundToInt(), gain, autoSync, lowLatency,
             )
         } else {
             MirrorState.error("Capture permission was declined, so there's nothing to mirror.")
@@ -209,6 +211,7 @@ private fun MirrorScreen() {
             .putInt(KEY_DELAY, delayMs.roundToInt())
             .putFloat(KEY_GAIN, gain)
             .putBoolean(KEY_AUTO_SYNC, autoSync)
+            .putBoolean(KEY_LOW_LATENCY, lowLatency)
             .apply()
     }
 
@@ -382,6 +385,29 @@ private fun MirrorScreen() {
                 Switch(
                     checked = autoSync,
                     onCheckedChange = { autoSync = it; persistTuning() },
+                )
+            }
+
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("Shortest possible delay", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        "Use when the mirrored pair is the one running LATE and the slider " +
+                            "can't help, because it only ever adds. Cuts the mirror's own " +
+                            "buffering to the minimum. May stutter on Bluetooth — if it " +
+                            "does, turn it back off. Takes effect next time you start.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(
+                    checked = lowLatency,
+                    enabled = !status.running,
+                    onCheckedChange = { lowLatency = it; persistTuning() },
                 )
             }
         }

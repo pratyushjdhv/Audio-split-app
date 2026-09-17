@@ -74,6 +74,16 @@ class MirrorEngine(
     @Volatile
     var autoSync: Boolean = true
 
+    /**
+     * Trade buffer headroom for latency. The mirror is always behind the source — it can
+     * only play a sample after capturing it — so when the mirror is on the pair that needs
+     * to be EARLIER, the delay slider is useless and the only thing left is to make the
+     * pipeline itself shorter. Costs underrun headroom, which on A2DP can mean stutter.
+     * Read at start(); buffer sizes are fixed when the streams are built.
+     */
+    @Volatile
+    var lowLatency: Boolean = false
+
     @Volatile
     private var running = false
 
@@ -115,6 +125,9 @@ class MirrorEngine(
             val minRecord = AudioRecord.getMinBufferSize(
                 AudioSpec.SAMPLE_RATE, AudioSpec.IN_CHANNEL_MASK, AudioSpec.ENCODING
             )
+            // Capacity, not latency: the relay drains this as fast as the OS fills it, and
+            // the lag trimmer holds the steady-state occupancy near zero. Keeping it roomy
+            // costs nothing and absorbs a stall without losing audio.
             val recordBytes = max(minRecord * 4, AudioSpec.msToBytes(250))
 
             rec = AudioRecord.Builder()
@@ -133,13 +146,20 @@ class MirrorEngine(
             // Kept modest so the output stack holds little unaccounted latency. Not a
             // suspect for the transition glitches: too small a buffer here would starve
             // A2DP during steady playback too, and it doesn't.
-            val trackBytes = max(minTrack, AudioSpec.msToBytes(80))
+            val trackBytes = if (lowLatency) {
+                minTrack
+            } else {
+                max(minTrack, AudioSpec.msToBytes(80))
+            }
 
             trk = AudioTrack.Builder()
                 .setAudioAttributes(AudioSpec.mirrorAttributes())
                 .setAudioFormat(AudioSpec.playbackFormat())
                 .setBufferSizeInBytes(trackBytes)
                 .setTransferMode(AudioTrack.MODE_STREAM)
+                .apply {
+                    if (lowLatency) setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
+                }
                 .build()
 
             if (trk.state != AudioTrack.STATE_INITIALIZED) {
@@ -201,8 +221,11 @@ class MirrorEngine(
 
     private fun pump(rec: AudioRecord, trk: AudioTrack) {
         Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
-        val buf = ByteArray(AudioSpec.CHUNK_BYTES)
-        val silence = ByteArray(AudioSpec.CHUNK_BYTES)
+        // Smaller chunks mean the relay hands audio on sooner, at the cost of doing it
+        // more often.
+        val chunkBytes = if (lowLatency) AudioSpec.CHUNK_BYTES / 2 else AudioSpec.CHUNK_BYTES
+        val buf = ByteArray(chunkBytes)
+        val silence = ByteArray(chunkBytes)
         var routingReported = false
         var sinceLevelReport = 0
         var bytesWritten = 0L
@@ -276,7 +299,7 @@ class MirrorEngine(
                 val wanted = AudioSpec.alignToFrame(
                     AudioSpec.msToBytes(delayMs.coerceIn(0, AudioSpec.MAX_DELAY_MS))
                 )
-                val step = AudioSpec.CHUNK_BYTES / 2
+                val step = chunkBytes / 2
                 if (appliedDelayBytes < wanted) {
                     val inject = AudioSpec.alignToFrame(minOf(wanted - appliedDelayBytes, step))
                     bytesWritten += writeFully(trk, silence, 0, inject)
