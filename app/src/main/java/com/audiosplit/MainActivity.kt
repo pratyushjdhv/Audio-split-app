@@ -48,7 +48,9 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import android.provider.Settings
 import com.audiosplit.audio.AudioSpec
+import com.audiosplit.audio.DefaultOutput
 import com.audiosplit.audio.OutputDevice
 import com.audiosplit.audio.OutputDevices
 import com.audiosplit.audio.ToneTester
@@ -102,6 +104,8 @@ private fun MirrorScreen() {
     var gain by remember { mutableFloatStateOf(prefs.getFloat(KEY_GAIN, 1f)) }
     var autoSync by remember { mutableStateOf(prefs.getBoolean(KEY_AUTO_SYNC, true)) }
     var lowLatency by remember { mutableStateOf(prefs.getBoolean(KEY_LOW_LATENCY, false)) }
+    var primary by remember { mutableStateOf<OutputDevice?>(null) }
+    var detecting by remember { mutableStateOf(false) }
     var toneResults by remember { mutableStateOf<List<ToneTester.Result>>(emptyList()) }
     var toneRunning by remember { mutableStateOf(false) }
     var micGranted by remember {
@@ -221,6 +225,12 @@ private fun MirrorScreen() {
         MirrorService.update(context, delayMs.roundToInt(), gain, autoSync)
     }
 
+    LaunchedEffect(devices, status.running) {
+        if (status.running) return@LaunchedEffect
+        detecting = true
+        DefaultOutput.detect { primary = it; detecting = false }
+    }
+
     LaunchedEffect(toneRunning) {
         if (toneRunning) {
             kotlinx.coroutines.delay(TONE_DURATION_MS + 300L)
@@ -247,7 +257,49 @@ private fun MirrorScreen() {
 
         StatusCard(status)
 
-        SectionCard("Step 1 — send the second copy to") {
+        SectionCard("Step 1 — the two outputs") {
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("Your player plays to", style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        when {
+                            detecting -> "checking…"
+                            primary != null -> primary!!.label
+                            else -> "couldn't tell"
+                        },
+                        style = MaterialTheme.typography.bodyLarge,
+                    )
+                }
+                OutlinedButton(
+                    onClick = {
+                        // Only the system switcher can move another app's audio; no API
+                        // lets us do it on their behalf. The output-switcher action isn't
+                        // in the SDK, so try it by name and fall back to sound settings.
+                        val panels = listOf(
+                            "android.settings.MEDIA_OUTPUT",
+                            Settings.Panel.ACTION_VOLUME,
+                            Settings.ACTION_SOUND_SETTINGS,
+                        )
+                        panels.firstOrNull { action ->
+                            runCatching { context.startActivity(Intent(action)) }.isSuccess
+                        }
+                    },
+                    enabled = !status.running,
+                ) {
+                    Text("Change")
+                }
+            }
+
+            Text(
+                "Mirror the copy to",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
             if (devices.isEmpty()) {
                 Text("No outputs found. Plug in the dongle and connect the Bluetooth headset.")
             }
@@ -263,12 +315,37 @@ private fun MirrorScreen() {
                     },
                 )
             }
-            Text(
-                "Pick the pair that is NOT currently getting sound. Android already sends " +
-                    "everything to the Bluetooth headset, so this is normally the wired one.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+
+            val collision = primary != null && primary!!.id == selectedId
+            val mirrorIsSlow = devices.firstOrNull { it.id == selectedId }?.type in BLUETOOTH_TYPES
+            val primaryIsSlow = primary?.type in BLUETOOTH_TYPES
+            when {
+                collision -> Text(
+                    "Both copies would go to this one pair, and the other person would hear " +
+                        "nothing. Pick the other output.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+
+                mirrorIsSlow && !primaryIsSlow -> Text(
+                    "Heads up: you're mirroring to the Bluetooth pair, which is the slower " +
+                        "one. The delay slider can only ADD delay, so it can't pull them " +
+                        "back into line. Better to tap Change above, send your player to " +
+                        "the Bluetooth pair instead, and mirror to the wired one — the " +
+                        "player shifts its own picture to match Bluetooth, which we can't " +
+                        "do for it.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.secondary,
+                )
+
+                primary != null -> Text(
+                    "Good: your player drives the slower pair and shifts its own picture to " +
+                        "match, and the mirror is on the faster one where the delay slider " +
+                        "can line it up.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
 
         SectionCard("Step 2 — check this device can do it") {
@@ -547,6 +624,11 @@ private fun persistDevice(
         .putBoolean(KEY_USER_CHOSE, userChose)
         .apply()
 }
+
+private val BLUETOOTH_TYPES = setOf(
+    AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,
+    AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
+)
 
 private val WIRED_TYPES = setOf(
     AudioDeviceInfo.TYPE_USB_HEADSET,
