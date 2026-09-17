@@ -22,30 +22,6 @@ object AudioSpec {
 
     const val MAX_DELAY_MS = 400
 
-    /**
-     * Floor on the buffered cushion. Below this the output starves on ordinary scheduler
-     * jitter. It must stay strictly greater than DRIFT_TOLERANCE_MS: if the two were
-     * equal, an empty ring would sit exactly on the low edge of the control band at the
-     * floor, the loop would accept zero occupancy as converged, and the mirror would
-     * splice in silence on every scheduler hiccup forever.
-     */
-    const val MIN_CUSHION_MS = 60
-
-    /**
-     * How far the buffer may wander from target before the drift loop corrects it.
-     * Must stay above one CHUNK_BYTES (~21ms) — the playback side removes a whole chunk
-     * at a time, so a tighter band would correct against read granularity rather than
-     * against real drift — and below MIN_CUSHION_MS, per the note above.
-     */
-    const val DRIFT_TOLERANCE_MS = 30
-
-    /**
-     * An excursion this far from target is corrected in one go rather than at the drift
-     * rate, which moves only ~10ms per second and would leave a real buffer excursion
-     * audible for a minute or more.
-     */
-    const val SEEK_REARM_MS = 90
-
     /** Routing only settles once audio has actually been flowing for a while. */
     const val ROUTING_SETTLE_MS = 400
 

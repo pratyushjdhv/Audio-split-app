@@ -93,8 +93,7 @@ private fun MirrorScreen() {
     var selectedId by remember { mutableIntStateOf(prefs.getInt(KEY_DEVICE, -1)) }
     var delayMs by remember {
         mutableFloatStateOf(
-            prefs.getInt(KEY_DELAY, 180)
-                .coerceIn(AudioSpec.MIN_CUSHION_MS, AudioSpec.MAX_DELAY_MS).toFloat()
+            prefs.getInt(KEY_DELAY, 180).coerceIn(0, AudioSpec.MAX_DELAY_MS).toFloat()
         )
     }
     var gain by remember { mutableFloatStateOf(prefs.getFloat(KEY_GAIN, 1f)) }
@@ -339,12 +338,11 @@ private fun MirrorScreen() {
                 label = "Delay on the mirrored side",
                 value = delayMs,
                 valueText = "${delayMs.roundToInt()} ms",
-                // Starts at the engine's cushion floor: anything below it is clamped
-                // away internally, so offering it would be a silently dead slider travel.
-                range = AudioSpec.MIN_CUSHION_MS.toFloat()..AudioSpec.MAX_DELAY_MS.toFloat(),
-                steps = ((AudioSpec.MAX_DELAY_MS - AudioSpec.MIN_CUSHION_MS) / 5) - 1,
-                hint = "Bluetooth runs behind the wire. Nudge this until both of you hear " +
-                    "lips and sound line up. Around 150-250 ms is typical.",
+                range = 0f..AudioSpec.MAX_DELAY_MS.toFloat(),
+                steps = (AudioSpec.MAX_DELAY_MS / 5) - 1,
+                hint = "Nudge this until you both hear the same moment. Mirroring to the " +
+                    "wired pair usually needs 150-250 ms; mirroring to Bluetooth usually " +
+                    "needs 0.",
                 onChange = { delayMs = it },
                 onChangeFinished = ::persistTuning,
             )

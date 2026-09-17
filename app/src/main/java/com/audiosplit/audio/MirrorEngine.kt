@@ -18,20 +18,26 @@ import kotlin.math.max
  * output device.
  *
  * The idea in one line: the source app (browser, Stremio, a music player) keeps playing
- * to whatever Android picked as the default output — with a Bluetooth headset connected
- * that's the Bluetooth headset. We capture the same PCM and push a second copy to the
- * wired dongle, so two people hear the same thing on two different headphones.
+ * to whatever Android picked as the default output, and we push a second copy to the
+ * other pair of headphones, so two people hear the same thing.
  *
- * Capture and playback run on separate threads either side of a [PcmRing]. That split is
- * what makes the delay measurable: the ring's occupancy *is* the current latency, so the
- * playback thread can compare it against the target every iteration and correct. The two
- * ends are clocked by different crystals — the capture side by the system mixer, the
- * output side by the USB DAC — and a few dozen ppm between them is enough to drift a
- * two-hour movie out of sync, or overrun the buffer, if nothing closes the loop.
+ * The relay is deliberately one blocking loop, not a buffered pipeline. read() paces
+ * itself to the capture clock, write() paces itself to the output clock, and the capture
+ * buffer absorbs the difference; at delay 0 neither the inject nor the drop branch below
+ * ever fires, so the audio passes through completely untouched.
  *
- * The delay knob exists because Bluetooth is slow. A2DP typically runs 150-250ms behind
- * the wire, so the wired copy has to be held back to match. It's adjustable while
- * running because the only way to get it right is to nudge it until it sounds right.
+ * That last property is the whole point, and it is why this is NOT a control loop. An
+ * earlier version measured buffer occupancy and corrected it continuously to compensate
+ * for clock drift. On Bluetooth that is actively harmful: A2DP drains in bursts, so
+ * occupancy swings hard on every packet, and any loop watching it reads normal bursty
+ * behaviour as an emergency and starts splicing in silence. The result was continuous
+ * choppiness in exchange for fixing a drift problem that takes tens of minutes to become
+ * audible. If drift ever does need handling, it has to be measured over minutes and
+ * corrected in single frames — never reactively, per chunk.
+ *
+ * The delay knob exists because Bluetooth is slow. Which side needs holding back depends
+ * on which pair Android chose as the default: mirroring to the wired pair usually wants
+ * 150-250ms, mirroring to Bluetooth usually wants 0.
  */
 class MirrorEngine(
     private val projection: MediaProjection,
@@ -65,12 +71,10 @@ class MirrorEngine(
     private var track: AudioTrack? = null
 
     @Volatile
-    private var captureThread: Thread? = null
+    private var worker: Thread? = null
 
-    @Volatile
-    private var playbackThread: Thread? = null
-
-    private var ring: PcmRing? = null
+    /** How much silence we have injected, i.e. the delay currently in effect. */
+    private var appliedDelayBytes = 0
 
     /**
      * Opens both streams and starts mirroring. Never throws: the Builder APIs throw rather
@@ -98,7 +102,7 @@ class MirrorEngine(
             val minRecord = AudioRecord.getMinBufferSize(
                 AudioSpec.SAMPLE_RATE, AudioSpec.IN_CHANNEL_MASK, AudioSpec.ENCODING
             )
-            val recordBytes = max(minRecord * 2, AudioSpec.msToBytes(200))
+            val recordBytes = max(minRecord * 4, AudioSpec.msToBytes(250))
 
             rec = AudioRecord.Builder()
                 .setAudioFormat(AudioSpec.captureFormat())
@@ -132,21 +136,19 @@ class MirrorEngine(
             val accepted = trk.setPreferredDevice(target)
             Log.i(TAG, "setPreferredDevice(${target.id}) accepted=$accepted")
 
-            ring = PcmRing(AudioSpec.msToBytes(AudioSpec.MAX_DELAY_MS + 600))
             record = rec
             track = trk
+            appliedDelayBytes = 0
             running = true
 
             rec.startRecording()
             trk.play()
 
-            captureThread = thread(name = "audiosplit-capture") { captureLoop(rec) }
-            playbackThread = thread(name = "audiosplit-playback") { playbackLoop(trk) }
+            worker = thread(name = "audiosplit-pump") { pump(rec, trk) }
         } catch (t: Throwable) {
             running = false
             record = null
             track = null
-            ring = null
             rec?.runCatching { stop() }
             rec?.runCatching { release() }
             trk?.runCatching { stop() }
@@ -174,23 +176,23 @@ class MirrorEngine(
         record?.runCatching { stop() }
         track?.runCatching { pause(); flush() }
 
-        captureThread?.join(1000)
-        playbackThread?.join(1000)
-        captureThread = null
-        playbackThread = null
+        worker?.join(1000)
+        worker = null
 
         record?.runCatching { release() }
         track?.runCatching { stop(); release() }
         record = null
         track = null
-        ring = null
     }
 
-    /** Reads capture into the ring as fast as the OS hands it over. Never blocks on output. */
-    private fun captureLoop(rec: AudioRecord) {
+    private fun pump(rec: AudioRecord, trk: AudioTrack) {
         Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
         val buf = ByteArray(AudioSpec.CHUNK_BYTES)
-        var chunk = 0
+        val silence = ByteArray(AudioSpec.CHUNK_BYTES)
+        var routingReported = false
+        var sinceLevelReport = 0
+        var bytesWritten = 0L
+
         try {
             while (running) {
                 val read = rec.read(buf, 0, buf.size)
@@ -204,162 +206,53 @@ class MirrorEngine(
                 }
                 if (read == 0) continue
 
-                // Peak is measured here, before gain, so the level meter answers "is the
-                // OS handing us audio?" rather than "is the mirror volume up?". Only every
-                // fifth chunk is scanned — the other four would be thrown away anyway.
-                if (++chunk % LEVEL_EVERY_N_CHUNKS == 0) {
-                    listener.onLevel(peakOf(buf, read))
-                }
+                var offset = 0
+                var length = read
 
-                ring?.write(buf, read)
-            }
-        } catch (t: Throwable) {
-            if (running) listener.onError("Capture failed: ${t.message ?: t::class.java.simpleName}")
-        }
-    }
-
-    /**
-     * Drains the ring to the output device, holding the ring's occupancy at the requested
-     * delay.
-     *
-     * Three mechanisms, because the three problems have genuinely different shapes:
-     *
-     *  - PRIMING builds the initial cushion before any audio flows. That cushion is the
-     *    delay.
-     *  - A SLIDER MOVE is applied as an exact delta, never by re-deriving from measured
-     *    occupancy. Occupancy swings by a whole chunk between reads, so any scheme that
-     *    compares it against a band either ignores small moves (a dead zone on the one
-     *    control the user tunes by ear) or chases its own read granularity. Applying the
-     *    delta makes every 5ms step produce exactly 5ms.
-     *  - DRIFT is tens of ppm between the capture clock and the DAC's own crystal, only
-     *    audible over tens of minutes. It is corrected against a one-second *average*
-     *    occupancy, which is what makes a band meaningful at all.
-     */
-    private fun playbackLoop(trk: AudioTrack) {
-        Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
-        val buf = ByteArray(AudioSpec.CHUNK_BYTES)
-        val silence = ByteArray(AudioSpec.CHUNK_BYTES)
-        val deadband = AudioSpec.msToBytes(AudioSpec.DRIFT_TOLERANCE_MS)
-        val resyncThreshold = AudioSpec.msToBytes(AudioSpec.SEEK_REARM_MS)
-
-        var bytesWritten = 0L
-        var lastRoutedId = Int.MIN_VALUE
-        var sinceRoutingCheck = 0
-        var lastTarget = -1
-        var primed = false
-        /** Bytes still to be added (+) or removed (-) to honour a slider move or resync. */
-        var pendingAdjust = 0
-        var occupancySum = 0L
-        var occupancySamples = 0
-        var sinceDriftCheck = 0
-
-        try {
-            while (running) {
-                val buffer = ring ?: break
-                val targetBytes = currentTargetBytes()
-                if (lastTarget < 0) {
-                    lastTarget = targetBytes
-                } else if (targetBytes != lastTarget) {
-                    pendingAdjust += targetBytes - lastTarget
-                    lastTarget = targetBytes
-                }
-
-                val occupancy = buffer.available
-
-                // Build the cushion before streaming anything. This is the delay.
-                if (!primed) {
-                    // Priming chases the absolute target, so a slider move made while it
-                    // runs is already accounted for — keeping the delta would double it.
-                    pendingAdjust = 0
-                    if (occupancy < targetBytes) {
-                        bytesWritten += writeFully(
-                            trk, silence, 0,
-                            AudioSpec.alignToFrame(
-                                minOf(targetBytes - occupancy, AudioSpec.CHUNK_BYTES)
-                            )
-                        )
-                        continue
-                    }
-                    primed = true
-                }
-
-                // Apply a pending move a slice at a time; a single jump would be audible.
-                if (pendingAdjust > 0) {
-                    val slice = AudioSpec.alignToFrame(
-                        minOf(pendingAdjust, AudioSpec.CHUNK_BYTES)
+                // Converge on the requested delay a bit at a time. Jumping straight there
+                // would either overrun the capture buffer (injecting) or chop a word in
+                // half (dropping), and this runs while someone is listening. At delay 0
+                // both branches are skipped entirely.
+                val wanted = AudioSpec.alignToFrame(
+                    AudioSpec.msToBytes(delayMs.coerceIn(0, AudioSpec.MAX_DELAY_MS))
+                )
+                val step = AudioSpec.CHUNK_BYTES / 2
+                if (appliedDelayBytes < wanted) {
+                    val inject = AudioSpec.alignToFrame(minOf(wanted - appliedDelayBytes, step))
+                    bytesWritten += writeFully(trk, silence, 0, inject)
+                    appliedDelayBytes += inject
+                } else if (appliedDelayBytes > wanted) {
+                    val drop = AudioSpec.alignToFrame(
+                        minOf(appliedDelayBytes - wanted, minOf(step, length))
                     )
-                    if (slice > 0) {
-                        bytesWritten += writeFully(trk, silence, 0, slice)
-                        pendingAdjust -= slice
-                    } else {
-                        pendingAdjust = 0
-                    }
-                    continue
-                } else if (pendingAdjust < 0) {
-                    val slice = AudioSpec.alignToFrame(
-                        minOf(-pendingAdjust, AudioSpec.CHUNK_BYTES)
-                    )
-                    pendingAdjust += if (slice > 0) buffer.discard(slice) else -pendingAdjust
+                    offset += drop
+                    length -= drop
+                    appliedDelayBytes -= drop
                 }
 
-                // Underrun guard: feed the DAC rather than let it run dry and click.
-                // Triggers with a chunk still in hand, not at zero — by the time the ring
-                // is actually empty the output has already glitched.
-                if (occupancy < AudioSpec.CHUNK_BYTES) {
-                    bytesWritten += writeFully(trk, silence, 0, CORRECTION_SLICE_BYTES)
-                    continue
-                }
+                if (length > 0) {
+                    // Peak is taken before gain, so the level meter answers "is the OS
+                    // handing us audio?" rather than "is the mirror volume up?".
+                    val peak = applyGainAndPeak(buf, offset, length, gain)
+                    bytesWritten += writeFully(trk, buf, offset, length)
 
-                val n = buffer.read(buf, buf.size)
-                if (n <= 0) continue
-
-                val g = gain
-                if (abs(g - 1.0f) >= 0.001f) applyGain(buf, n, g)
-                bytesWritten += writeFully(trk, buf, 0, n)
-
-                occupancySum += occupancy.toLong()
-                occupancySamples++
-                sinceDriftCheck += n
-
-                if (pendingAdjust == 0 && sinceDriftCheck >= AudioSpec.msToBytes(DRIFT_CHECK_MS)) {
-                    sinceDriftCheck = 0
-                    val average = if (occupancySamples > 0) {
-                        (occupancySum / occupancySamples).toInt()
-                    } else {
-                        occupancy
-                    }
-                    occupancySum = 0
-                    occupancySamples = 0
-
-                    val error = average - targetBytes
-                    if (abs(error) > resyncThreshold) {
-                        // A real excursion — an overflow, or the output stalled. Correcting
-                        // this at the drift rate would leave it audible for a minute, so
-                        // schedule the whole difference as one adjustment.
-                        pendingAdjust = -error
-                    } else if (abs(error) > deadband) {
-                        pendingAdjust = -(if (error > 0) {
-                            minOf(error, CORRECTION_SLICE_BYTES)
-                        } else {
-                            maxOf(error, -CORRECTION_SLICE_BYTES)
-                        })
+                    sinceLevelReport += length
+                    if (sinceLevelReport >= AudioSpec.msToBytes(100)) {
+                        sinceLevelReport = 0
+                        listener.onLevel(peak)
                     }
                 }
 
-                // Routing only settles once audio has genuinely been flowing, and it can
-                // change underneath us if a device connects or drops mid-movie.
-                sinceRoutingCheck += n
-                if (bytesWritten >= AudioSpec.msToBytes(AudioSpec.ROUTING_SETTLE_MS) &&
-                    sinceRoutingCheck >= AudioSpec.msToBytes(ROUTING_CHECK_MS)
+                // Latched once, after enough audio has flowed for the route to settle.
+                // Polling it repeatedly would put a binder call on the audio thread every
+                // time round, and this thread must never block on anything but the two
+                // audio streams. A null read means "not settled yet", not "overridden".
+                if (!routingReported &&
+                    bytesWritten >= AudioSpec.msToBytes(AudioSpec.ROUTING_SETTLE_MS)
                 ) {
-                    sinceRoutingCheck = 0
-                    // A null read means the route is in transition or the device just
-                    // went away — not that the ROM overrode us. Reporting it as an
-                    // override would blame the device for a jostled cable, on the one
-                    // diagnostic this whole app rests on.
                     val actual = trk.routedDevice
-                    if (actual != null && actual.id != lastRoutedId) {
-                        lastRoutedId = actual.id
+                    if (actual != null) {
+                        routingReported = true
                         listener.onRouting(actual.id == target.id, actual.toOutputDevice())
                     }
                 }
@@ -368,14 +261,6 @@ class MirrorEngine(
             if (running) listener.onError("Mirror stopped: ${t.message ?: t::class.java.simpleName}")
         }
     }
-
-    /** The delay, in bytes, floored so the output always has something to coast on. */
-    private fun currentTargetBytes() = AudioSpec.alignToFrame(
-        max(
-            AudioSpec.msToBytes(delayMs.coerceIn(0, AudioSpec.MAX_DELAY_MS)),
-            AudioSpec.msToBytes(AudioSpec.MIN_CUSHION_MS),
-        )
-    )
 
     /** AudioTrack is allowed to accept a partial write; loop until the chunk is gone. */
     private fun writeFully(trk: AudioTrack, data: ByteArray, offset: Int, length: Int): Int {
@@ -389,28 +274,24 @@ class MirrorEngine(
     }
 
     /**
-     * Scales 16-bit little-endian samples in place. Separate from the system volume on
-     * purpose: the volume rocker moves the source app's Bluetooth output too, so it can't
-     * be used to balance one ear against the other. Skipped entirely at unity gain.
+     * Scales 16-bit little-endian samples in place and returns the peak of the ORIGINAL
+     * samples. Gain is separate from the system volume on purpose: the volume rocker moves
+     * the source app's output too, so it can't balance one pair against the other.
      */
-    private fun applyGain(buf: ByteArray, length: Int, gain: Float) {
-        var i = 0
-        while (i + 1 < length) {
-            val sample = (((buf[i + 1].toInt() shl 8) or (buf[i].toInt() and 0xFF)).toShort()).toInt()
-            val scaled = (sample * gain).toInt().coerceIn(-32768, 32767)
-            buf[i] = (scaled and 0xFF).toByte()
-            buf[i + 1] = ((scaled shr 8) and 0xFF).toByte()
-            i += 2
-        }
-    }
-
-    private fun peakOf(buf: ByteArray, length: Int): Float {
+    private fun applyGainAndPeak(buf: ByteArray, offset: Int, length: Int, gain: Float): Float {
         var peak = 0
-        var i = 0
-        while (i + 1 < length) {
+        val unity = abs(gain - 1.0f) < 0.001f
+        var i = offset
+        val end = offset + length - 1
+        while (i < end) {
             val sample = (((buf[i + 1].toInt() shl 8) or (buf[i].toInt() and 0xFF)).toShort()).toInt()
             val magnitude = abs(sample)
             if (magnitude > peak) peak = magnitude
+            if (!unity) {
+                val scaled = (sample * gain).toInt().coerceIn(-32768, 32767)
+                buf[i] = (scaled and 0xFF).toByte()
+                buf[i + 1] = ((scaled shr 8) and 0xFF).toByte()
+            }
             i += 2
         }
         return peak / 32768f
@@ -418,16 +299,5 @@ class MirrorEngine(
 
     private companion object {
         const val TAG = "MirrorEngine"
-
-        /** ~100ms between level reports at 21ms per chunk. */
-        const val LEVEL_EVERY_N_CHUNKS = 5
-
-        /** Correct drift gradually; a single large jump would be audible. */
-        const val CORRECTION_SLICE_BYTES = AudioSpec.CHUNK_BYTES / 2
-
-        /** Drift accrues over minutes; checking once a second is ample. */
-        const val DRIFT_CHECK_MS = 1000
-
-        const val ROUTING_CHECK_MS = 1000
     }
 }

@@ -26,9 +26,14 @@ Open AudioSplit. You'll see a list of every output the tablet can see.
 
 **Pick the pair that is NOT currently getting sound.**
 
-Normally that's the **wired / USB-C** one, because Android automatically sends everything
-to Bluetooth as soon as it connects. AudioSplit pre-selects the wired pair for you, so
-usually you can just leave it alone.
+Which one that is depends on your tablet. Android picks one output as the default and
+sends everything there; AudioSplit copies the sound to the *other* one. So:
+
+- If your video is already coming out of the **Bluetooth** headphones → pick the **wired** one
+- If your video is already coming out of the **wired** earphones → pick the **Bluetooth** one
+
+Not sure which? Step 2 tells you — it prints "your apps currently play to: …". Pick the
+other one.
 
 ---
 
@@ -81,12 +86,19 @@ Both people should now hear the film.
 
 ### Step 5 — Line up the sound
 
-Bluetooth is slower than a wire — sound reaches the Bluetooth ears roughly a fifth of a
-second late. So the wired copy has to be held back to match.
+Bluetooth is slower than a wire — sound reaches Bluetooth ears roughly a fifth of a second
+late. The delay slider holds the mirrored copy back so the two line up.
 
 **Drag the "Delay on the mirrored side" slider until you both hear the same thing at the
 same moment.** It updates live while the film plays, so just nudge it until it sounds
-right. Around **180 ms** is a good starting point.
+right.
+
+Where to start depends on which pair you're mirroring to:
+
+| Mirroring to | Try around |
+| --- | --- |
+| The **wired** earphones | **180 ms** — the Bluetooth side is already running late, so the wired copy waits for it |
+| The **Bluetooth** headphones | **0 ms** — Bluetooth is already the slow one; adding more would make it worse |
 
 The slider only needs setting once per pair of headphones — the app remembers it.
 
