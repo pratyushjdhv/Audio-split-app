@@ -26,6 +26,8 @@ data class MirrorStatus(
     val microTrims: Int = 0,
     /** Times the capture stream was reopened after a gap. */
     val restarts: Int = 0,
+    /** True when some app is actually feeding us audio, silent or not. */
+    val receivingData: Boolean = false,
 )
 
 /**
@@ -75,7 +77,11 @@ object MirrorState {
     }
 
     fun level(peak: Float) {
-        _status.update { it.copy(level = peak) }
+        _status.update { it.copy(level = peak, receivingData = true) }
+    }
+
+    fun idle() {
+        _status.update { it.copy(level = 0f, receivingData = false) }
     }
 
     fun error(message: String?) {

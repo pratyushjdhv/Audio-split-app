@@ -225,10 +225,12 @@ private fun MirrorScreen() {
         MirrorService.update(context, delayMs.roundToInt(), gain, autoSync)
     }
 
+    // Runs while mirroring too. Skipping it there meant the screen said "couldn't tell"
+    // when it had simply never looked.
+    var probed by remember { mutableStateOf(false) }
     LaunchedEffect(devices, status.running) {
-        if (status.running) return@LaunchedEffect
         detecting = true
-        DefaultOutput.detect { primary = it; detecting = false }
+        DefaultOutput.detect { primary = it; detecting = false; probed = true }
     }
 
     LaunchedEffect(toneRunning) {
@@ -268,9 +270,10 @@ private fun MirrorScreen() {
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Text(
                         when {
-                            detecting -> "checking…"
                             primary != null -> primary!!.label
-                            else -> "couldn't tell"
+                            detecting -> "checking…"
+                            probed -> "couldn't tell — this device won't say"
+                            else -> "checking…"
                         },
                         style = MaterialTheme.typography.bodyLarge,
                     )
@@ -595,9 +598,17 @@ private fun StatusCard(status: MirrorStatus) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Text(
-                if (status.level > 0.001f) "Receiving audio." else
-                    "Silent. If something is playing, that app blocks audio capture (Netflix and " +
-                        "friends do). Try the browser or a local file.",
+                when {
+                    status.level > 0.001f -> "Receiving audio."
+                    // Being handed silence is not the same as being handed nothing: a
+                    // capture-blocking app still occupies a session and feeds us zeros.
+                    status.receivingData ->
+                        "Something is playing but every sample is silent, which is what a " +
+                            "capture-blocking app looks like — Netflix, Prime and Disney+ " +
+                            "all do this. Try a browser or a local file."
+                    else -> "Nothing is playing right now. Start your video and this will " +
+                        "pick it up on its own."
+                },
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

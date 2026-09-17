@@ -115,6 +115,8 @@ class MirrorService : Service() {
 
                 override fun onRestart(restarts: Int) = MirrorState.restarted(restarts)
 
+                override fun onIdle() = MirrorState.idle()
+
                 override fun onError(message: String) {
                     MirrorState.error(message)
                     main.post { stopSelf() }

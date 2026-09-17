@@ -64,6 +64,12 @@ class MirrorEngine(
         /** The capture stream was reopened after a gap, to clear a stale resume. */
         fun onRestart(restarts: Int)
 
+        /**
+         * No audio session at all — nothing is playing. Distinct from being handed
+         * silence, which is what a capture-blocking app like Netflix looks like.
+         */
+        fun onIdle()
+
         fun onError(message: String)
     }
 
@@ -279,6 +285,7 @@ class MirrorEngine(
         var checks = 0
         var outputLatencyMs = -1
         var idleSinceNanos = 0L
+        var reportedIdle = false
         var restarts = 0
         val timestamp = AudioTimestamp()
 
@@ -301,6 +308,12 @@ class MirrorEngine(
                     // the pause lasts. Yield instead; a few ms of latency while nothing is
                     // playing costs nothing.
                     if (idleSinceNanos == 0L) idleSinceNanos = System.nanoTime()
+                    if (!reportedIdle &&
+                        (System.nanoTime() - idleSinceNanos) / 1_000_000L >= IDLE_REPORT_MS
+                    ) {
+                        reportedIdle = true
+                        listener.onIdle()
+                    }
                     Thread.sleep(IDLE_BACKOFF_MS)
                     continue
                 }
@@ -313,6 +326,7 @@ class MirrorEngine(
                 if (idleSinceNanos != 0L) {
                     val idleMs = (System.nanoTime() - idleSinceNanos) / 1_000_000L
                     idleSinceNanos = 0L
+                    reportedIdle = false
                     if (idleMs >= AudioSpec.STALE_AFTER_IDLE_MS) {
                         val fresh = runCatching {
                             rec.runCatching { stop(); release() }
@@ -491,6 +505,9 @@ class MirrorEngine(
 
         /** Backoff when capture has nothing for us, so the loop never spins hot. */
         const val IDLE_BACKOFF_MS = 5L
+
+        /** How long with no audio session before the UI is told nothing is playing. */
+        const val IDLE_REPORT_MS = 700L
 
         /** getTimestamp is a relatively costly call; sample it far less often than the lag. */
         const val TIMESTAMP_EVERY_N_CHECKS = 4

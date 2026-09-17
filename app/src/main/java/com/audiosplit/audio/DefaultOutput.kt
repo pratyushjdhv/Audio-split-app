@@ -23,7 +23,13 @@ object DefaultOutput {
             var track: AudioTrack? = null
             try {
                 val frames = AudioSpec.SAMPLE_RATE / 2
+                // Not pure silence: an all-zero stream can be optimised away before it is
+                // ever routed, and then there is nothing to ask about. One LSB of dither
+                // is about -90 dBFS — inaudible on anything, but unmistakably real audio.
                 val silence = ByteArray(frames * AudioSpec.BYTES_PER_FRAME)
+                for (i in silence.indices step 2) {
+                    silence[i] = if ((i / 2) % 2 == 0) 1 else 0
+                }
                 val built = AudioTrack.Builder()
                     .setAudioAttributes(AudioSpec.mirrorAttributes())
                     .setAudioFormat(AudioSpec.playbackFormat())
