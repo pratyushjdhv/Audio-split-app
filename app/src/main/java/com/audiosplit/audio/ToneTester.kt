@@ -22,8 +22,9 @@ import kotlin.math.sin
  * one pair of ears and the other person hears nothing. Pinning every track under test
  * would hide exactly that case.
  *
- * Tracks are built with the mirror's own AudioAttributes, so a pass certifies the
- * configuration the mirror actually opens rather than a lookalike.
+ * Pinned tones are built with the mirror's own AudioAttributes, so a pass certifies the
+ * configuration the mirror actually opens rather than a lookalike. The probe uses media
+ * attributes, because it stands in for the source app.
  */
 object ToneTester {
 
@@ -113,7 +114,11 @@ object ToneTester {
         val pcm = sineWave(frequencyHz, silent)
 
         val track = AudioTrack.Builder()
-            .setAudioAttributes(AudioSpec.mirrorAttributes())
+            // Pinned tones open exactly what the mirror opens; the un-pinned probe opens what
+            // a video app opens, because its job is to find where THAT audio goes.
+            .setAudioAttributes(
+                if (device != null) AudioSpec.mirrorAttributes() else AudioSpec.sourceAttributes()
+            )
             .setAudioFormat(AudioSpec.playbackFormat())
             .setBufferSizeInBytes(pcm.size)
             .setTransferMode(AudioTrack.MODE_STATIC)

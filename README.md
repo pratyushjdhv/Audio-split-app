@@ -204,6 +204,15 @@ the delay and every Bluetooth burst in that tiny buffer, which overflows constan
 choppy audio. With the ring, the capture thread only reads and appends, so the platform
 buffer stays empty and the delay lives in app memory.
 
+Easiest of all to miss: **the mirror must not play as media.** A pinned media track and
+the source app's media track fight. Android routes the whole media strategy to a pinned
+device while every active media client is pinned, and OEM policies hook every
+music-stream start in ways that tear the other output down. On a OnePlus tablet the
+mirror and VLC rebuilt each other's streams nine times a second, which sounds like
+"a-a-a-a" on both pairs and is why starting the mirror before the video used to break
+it. The mirror plays as `USAGE_ASSISTANCE_ACCESSIBILITY`, the one usage with its own
+routing strategy; see `AudioSpec.mirrorAttributes()`.
+
 Also easy to miss: capture never goes quiet by returning no data. With nothing playing,
 or with an app that blocks capture, Android feeds exact zeros in real time. "Nothing is
 coming through" can only be detected as sustained digital silence.

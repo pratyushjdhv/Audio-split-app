@@ -31,7 +31,9 @@ object DefaultOutput {
                     silence[i] = if ((i / 2) % 2 == 0) 1 else 0
                 }
                 val built = AudioTrack.Builder()
-                    .setAudioAttributes(AudioSpec.mirrorAttributes())
+                    // Media attributes, not the mirror's: this stands in for VLC or the
+                    // browser, and the mirror deliberately plays as something else.
+                    .setAudioAttributes(AudioSpec.sourceAttributes())
                     .setAudioFormat(AudioSpec.playbackFormat())
                     .setBufferSizeInBytes(silence.size)
                     .setTransferMode(AudioTrack.MODE_STATIC)

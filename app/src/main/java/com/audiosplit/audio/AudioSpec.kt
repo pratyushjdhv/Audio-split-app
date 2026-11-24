@@ -107,12 +107,36 @@ object AudioSpec {
         .build()
 
     /**
-     * Shared by the mirror and by the routing test on purpose: the test is only meaningful
-     * if it certifies byte-for-byte the same stream configuration the mirror will open.
-     * OEM effect stages can be bound to a specific content type and can override routing,
-     * so a test that passed with different attributes would prove nothing.
+     * The mirror's own output. Deliberately NOT USAGE_MEDIA, which is the single most
+     * important line in the app.
+     *
+     * A pinned media track and the source app's media track fight. Android routes a whole
+     * product strategy to a pinned device whenever every active client in it is pinned, so
+     * a mirror started first drags the next video app onto the mirror's device; and OEM
+     * policies hook every MUSIC-stream start (OnePlus: Dolby "music effects" and Hi-Fi
+     * sample-rate switching) in ways that tear down the OTHER music output. Measured on a
+     * OnePlus tablet (OPD2305, Android 14): the mirror and VLC invalidated each other about
+     * nine times a second, 740 and 495 stream rebuilds in 80 s, heard on both pairs as
+     * "a-a-a-a".
+     *
+     * Accessibility is the one usage with its own product strategy and its own stream type
+     * (ASSISTANT still lives under MEDIA), so pinning it moves nothing else and no music
+     * hook fires for it. Its volume follows the media volume unless a screen reader asks
+     * otherwise, and the gain slider sits on top.
+     *
+     * Shared with the routing test's pinned tones on purpose: the test only means something
+     * if it opens exactly the configuration the mirror will.
      */
     fun mirrorAttributes(): AudioAttributes = AudioAttributes.Builder()
+        .setUsage(AudioAttributes.USAGE_ASSISTANCE_ACCESSIBILITY)
+        .setContentType(AudioAttributes.CONTENT_TYPE_MOVIE)
+        .build()
+
+    /**
+     * What a typical video or music app plays with. Only for probing where the SOURCE app's
+     * audio lands — never for the mirror, see [mirrorAttributes].
+     */
+    fun sourceAttributes(): AudioAttributes = AudioAttributes.Builder()
         .setUsage(AudioAttributes.USAGE_MEDIA)
         .setContentType(AudioAttributes.CONTENT_TYPE_MOVIE)
         .build()
