@@ -155,9 +155,21 @@ actually fails, so run the test first.
 
 ## Installing it
 
-**From GitHub Actions:** go to the **Actions** tab → **Build APK** → newest run → download
-`audiosplit-debug-apk`. Unzip on the tablet and open the APK. You'll need to allow
-"install unknown apps" for whatever file manager you use.
+**Easiest:** on the phone or tablet, open the
+[latest release](https://github.com/pratyushjdhv/Audio-split-app/releases/latest), download
+`AudioSplit-<version>.apk` and open it. Android asks once to allow installing apps from
+your browser or file manager — allow it.
+
+- Works on **Android 10 or newer**, phones and tablets alike. Android 10 is a hard floor:
+  the system feature that lets one app copy another's sound arrived in that version.
+- One APK for every device: it carries every processor type Android runs on (64- and
+  32-bit ARM, 64- and 32-bit x86).
+- If Android says the package conflicts with an existing one, you have an older build
+  signed differently (for example from GitHub Actions). Uninstall AudioSplit, then
+  install again.
+
+**Latest development build:** **Actions** tab → **Build APK** → newest run → download
+`audiosplit-debug-apk`, unzip it and open the APK.
 
 > Actions has to be switched on for the repo first:
 > **Settings → Actions → General → Allow all actions**, then push anything.
@@ -165,13 +177,11 @@ actually fails, so run the test first.
 **Building it yourself:**
 
 ```bash
-./gradlew assembleDebug
+./gradlew assembleRelease   # app/build/outputs/apk/release/app-release.apk
+./gradlew assembleDebug     # app/build/outputs/apk/debug/app-debug.apk
 ```
 
-Needs JDK 17 and an Android SDK with platform 35. The APK lands in
-`app/build/outputs/apk/debug/`.
-
-Minimum Android version is **10** — the audio-copying feature didn't exist before that.
+Needs JDK 17 and an Android SDK with platform 35.
 
 ---
 

@@ -12,8 +12,8 @@ android {
         applicationId = "com.audiosplit"
         minSdk = 29
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.1"
     }
 
     buildTypes {
@@ -21,7 +21,9 @@ android {
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             // Signed with the debug key so `assembleRelease` produces a directly
-            // installable APK in CI. This app is sideloaded, never distributed.
+            // installable APK anywhere. The APKs on GitHub Releases are all built on one
+            // machine, so they share its debug key and install over each other as updates;
+            // a build signed elsewhere (CI, another PC) needs the old one uninstalled first.
             signingConfig = signingConfigs.getByName("debug")
         }
     }
