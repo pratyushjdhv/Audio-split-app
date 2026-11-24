@@ -39,7 +39,11 @@ object DefaultOutput {
                     .setTransferMode(AudioTrack.MODE_STATIC)
                     .build()
                 track = built
-                if (built.state != AudioTrack.STATE_INITIALIZED) {
+                // A static track reports STATE_NO_STATIC_DATA until its buffer is written,
+                // so only an outright failure counts here. This used to demand
+                // STATE_INITIALIZED before the write, which no static track can satisfy: the
+                // probe gave up on every device and the screen always said "couldn't tell".
+                if (built.state == AudioTrack.STATE_UNINITIALIZED) {
                     onResult(null)
                     return@thread
                 }

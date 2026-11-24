@@ -1,8 +1,18 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
 }
+
+// The release key lives outside the repo. keystore.properties (git-ignored, project root)
+// names it with storeFile, storePassword, keyAlias and keyPassword. Without that file — CI,
+// a fresh clone — release builds fall back to the debug key: still installable, but not an
+// update for anyone running a published release.
+val releaseSigning: Properties? = rootProject.file("keystore.properties")
+    .takeIf { it.exists() }
+    ?.let { file -> Properties().apply { file.inputStream().use { load(it) } } }
 
 android {
     namespace = "com.audiosplit"
@@ -12,19 +22,26 @@ android {
         applicationId = "com.audiosplit"
         minSdk = 29
         targetSdk = 34
-        versionCode = 3
-        versionName = "1.2"
+        versionCode = 4
+        versionName = "1.3"
+    }
+
+    signingConfigs {
+        releaseSigning?.let { props ->
+            create("release") {
+                storeFile = file(props.getProperty("storeFile"))
+                storePassword = props.getProperty("storePassword")
+                keyAlias = props.getProperty("keyAlias")
+                keyPassword = props.getProperty("keyPassword")
+            }
+        }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            // Signed with the debug key so `assembleRelease` produces a directly
-            // installable APK anywhere. The APKs on GitHub Releases are all built on one
-            // machine, so they share its debug key and install over each other as updates;
-            // a build signed elsewhere (CI, another PC) needs the old one uninstalled first.
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
         }
     }
 

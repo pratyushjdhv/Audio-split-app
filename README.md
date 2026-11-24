@@ -164,9 +164,11 @@ your browser or file manager — allow it.
   the system feature that lets one app copy another's sound arrived in that version.
 - One APK for every device: it carries every processor type Android runs on (64- and
   32-bit ARM, 64- and 32-bit x86).
-- If Android says the package conflicts with an existing one, you have an older build
-  signed differently (for example from GitHub Actions). Uninstall AudioSplit, then
-  install again.
+- Coming from **1.1 or 1.2**: uninstall AudioSplit once, then install. Releases are signed
+  with a dedicated key from 1.3 on, and Android won't update across a key change. After
+  that, new releases install straight over the old one and keep your settings.
+- If Android says the package conflicts with an existing one, you have a build signed
+  differently (for example from GitHub Actions). Uninstall AudioSplit, then install again.
 
 **Latest development build:** **Actions** tab → **Build APK** → newest run → download
 `audiosplit-debug-apk`, unzip it and open the APK.
@@ -181,7 +183,10 @@ your browser or file manager — allow it.
 ./gradlew assembleDebug     # app/build/outputs/apk/debug/app-debug.apk
 ```
 
-Needs JDK 17 and an Android SDK with platform 35.
+Needs JDK 17 and an Android SDK with platform 35. Release builds are signed with the key
+named in a git-ignored `keystore.properties` at the project root (`storeFile`,
+`storePassword`, `keyAlias`, `keyPassword`); without that file they fall back to the debug
+key, which installs fine but won't update a published release.
 
 ---
 
