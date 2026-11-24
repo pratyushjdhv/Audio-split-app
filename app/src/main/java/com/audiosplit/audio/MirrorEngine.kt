@@ -421,6 +421,7 @@ class MirrorEngine(
         var windowStartNanos = 0L
         var windowSum = 0L
         var windowCount = 0
+        var windowMin = Long.MAX_VALUE
         var pendingFrames = 0 // > 0: squeeze frames out; < 0: stretch frames in
         var corrections = 0
         var resyncs = 0
@@ -448,6 +449,7 @@ class MirrorEngine(
             windowStartNanos = 0L
             windowSum = 0L
             windowCount = 0
+            windowMin = Long.MAX_VALUE
         }
 
         try {
@@ -541,13 +543,30 @@ class MirrorEngine(
                     if (windowCount == 0) windowStartNanos = now
                     windowSum += fill
                     windowCount++
+                    if (fill < windowMin) windowMin = fill.toLong()
                     if ((now - windowStartNanos) / 1_000_000L >= AudioSpec.DRIFT_WINDOW_MS) {
                         val mean = windowSum / windowCount
                         if (referenceFill < 0) {
-                            referenceFill = mean
+                            // Audio that piled up while the streams were starting (an output
+                            // slow to begin draining) never leaves again: the fill doesn't dip
+                            // below it once in the whole window. Left alone it is permanent
+                            // extra latency on the mirror (measured: ~65 ms mirroring to a
+                            // OnePlus speaker, none to USB). Squeeze it out with the same
+                            // inaudible stretch drift uses and hold sync at the trimmed level.
+                            // Bounded by the floor above the user's delay plus a chunk of
+                            // headroom, so it can never eat delay that sits in the ring.
+                            val excess = windowMin - appliedDelayBytes - chunkBytes
+                            val trim = if (autoSync && excess > 0) {
+                                AudioSpec.alignToFrame(excess.toInt())
+                            } else {
+                                0
+                            }
+                            referenceFill = mean - trim
+                            if (trim > 0) pendingFrames = trim / AudioSpec.BYTES_PER_FRAME
                             Log.i(
                                 TAG,
-                                "DIAG drift reference fill ${AudioSpec.bytesToMs(mean.toInt())}ms"
+                                "DIAG drift reference fill ${AudioSpec.bytesToMs(mean.toInt())}ms, " +
+                                    "trimming ${AudioSpec.bytesToMs(trim)}ms of start-up backlog"
                             )
                         } else {
                             val drift = mean - referenceFill

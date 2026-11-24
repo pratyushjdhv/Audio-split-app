@@ -239,6 +239,9 @@ problems have different shapes:
   single readings: fill swings by tens of ms on every A2DP burst and capture chunk.
   Outside a 15 ms band it is corrected by resampling a chunk by one or two frames (a 0.1%
   speed change for 21 ms), never by cutting samples out, which clicks.
+- **Start-up backlog** — audio that piles up while an output is slow to start draining,
+  and then never leaves — is squeezed out the same inaudible way once, when the drift
+  reference is taken, instead of becoming permanent latency.
 - **Real breaks** — fill 200 ms off from where it belongs, either way — are fixed in one
   step: the excess cut, or a drained delay put back as silence, so sync is right
   immediately.
