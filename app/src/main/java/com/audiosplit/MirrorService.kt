@@ -107,15 +107,13 @@ class MirrorService : Service() {
                     MirrorState.routing(honored, actual)
 
                 override fun onSync(
-                    excessMs: Int,
+                    driftMs: Int,
                     resyncs: Int,
                     outputLatencyMs: Int,
-                    microTrims: Int,
-                ) = MirrorState.sync(excessMs, resyncs, outputLatencyMs, microTrims)
+                    corrections: Int,
+                ) = MirrorState.sync(driftMs, resyncs, outputLatencyMs, corrections)
 
-                override fun onRestart(restarts: Int) = MirrorState.restarted(restarts)
-
-                override fun onIdle() = MirrorState.idle()
+                override fun onSilence() = MirrorState.silence()
 
                 override fun onError(message: String) {
                     MirrorState.error(message)

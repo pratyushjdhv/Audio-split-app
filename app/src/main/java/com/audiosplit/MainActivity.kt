@@ -455,9 +455,10 @@ private fun MirrorScreen() {
                 Column(Modifier.weight(1f)) {
                     Text("Hold the sync automatically", style = MaterialTheme.typography.bodyMedium)
                     Text(
-                        "Trims a millisecond at a time so the delay you set by ear stays " +
-                            "put over a long film. Too small to hear. Turn it off if " +
-                            "anything sounds wrong and the mirror goes back to a plain copy.",
+                        "Keeps the delay you set by ear in place over a long film. Checks " +
+                            "every 10 seconds and corrects by stretching the sound a sample " +
+                            "at a time, which you can't hear. Turn it off and the mirror is " +
+                            "a plain copy that may slowly drift out of sync.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -580,34 +581,33 @@ private fun StatusCard(status: MirrorStatus) {
             }
             LevelMeter(level = status.level, active = true)
 
-            // Sync diagnostics. Worth surfacing because the two failure modes look
-            // identical from the sofa but have different causes: a jump in "skipped
-            // forward" is the mirror shedding a backlog (a video ending, a track change),
-            // while "in output" creeping up over time is lip-sync drift.
+            // Sync diagnostics. Worth surfacing because the failure modes look identical
+            // from the sofa but have different causes: a jump in "resynced" is the mirror
+            // recovering from a real break, while "drift" is the slow clock mismatch the
+            // sample-at-a-time corrections are holding in check.
             Text(
                 buildString {
                     append("in output: ")
                     append(if (status.outputLatencyMs < 0) "n/a" else "${status.outputLatencyMs} ms")
-                    append("   ·   trims: ${status.microTrims}")
-                    if (status.restarts > 0) append("   ·   reopened: ${status.restarts}x")
-                    append("   ·   skipped forward: ${status.resyncs}x")
-                    if (status.excessMs > 20) append("   ·   catching up ${status.excessMs} ms")
+                    append("   ·   drift: ${status.driftMs} ms")
+                    append("   ·   corrected: ${status.corrections * 1000 / AudioSpec.SAMPLE_RATE} ms")
+                    append("   ·   resynced: ${status.resyncs}x")
                 },
                 style = MaterialTheme.typography.bodySmall,
                 fontFamily = FontFamily.Monospace,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Text(
-                when {
-                    status.level > 0.001f -> "Receiving audio."
-                    // Being handed silence is not the same as being handed nothing: a
-                    // capture-blocking app still occupies a session and feeds us zeros.
-                    status.receivingData ->
-                        "Something is playing but every sample is silent, which is what a " +
-                            "capture-blocking app looks like — Netflix, Prime and Disney+ " +
-                            "all do this. Try a browser or a local file."
-                    else -> "Nothing is playing right now. Start your video and this will " +
-                        "pick it up on its own."
+                // Android hands the mirror exact zeros both when nothing is playing and
+                // when the playing app blocks capture, so the screen can't tell those
+                // apart and mustn't pretend to.
+                if (status.silent) {
+                    "Nothing is coming through. Either nothing is playing yet — start your " +
+                        "video and this picks it up on its own — or the app you're using " +
+                        "blocks audio copying (Netflix, Prime and Disney+ do). Browsers, " +
+                        "Stremio and local files work."
+                } else {
+                    "Receiving audio."
                 },
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,

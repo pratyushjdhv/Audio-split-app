@@ -197,33 +197,48 @@ It isn't a media player. It's a **system audio mirror**:
    `setPreferredDevice()`.
 
 Capture and playback run on separate threads either side of a ring buffer. That split is
-load-bearing: the ring's occupancy *is* the current latency, so the playback thread can
-measure and correct it. The two ends are clocked by different crystals — the system mixer
-on one side, the USB DAC's own on the other — and a few dozen ppm is enough to drift a
-two-hour film out of sync or overrun the buffer if nothing closes the loop.
+load-bearing, for a reason that's easy to miss: **for playback capture Android ignores
+the buffer size you ask for** and allocates its minimum (measured: 250 ms requested,
+64 ms granted), then silently drops audio when that fills. A single-threaded relay parks
+the delay and every Bluetooth burst in that tiny buffer, which overflows constantly —
+choppy audio. With the ring, the capture thread only reads and appends, so the platform
+buffer stays empty and the delay lives in app memory.
 
-Three separate mechanisms, because the three problems have different shapes:
+Also easy to miss: capture never goes quiet by returning no data. With nothing playing,
+or with an app that blocks capture, Android feeds exact zeros in real time. "Nothing is
+coming through" can only be detected as sustained digital silence.
 
-- **Priming** builds the initial cushion. That cushion is the delay.
-- **Slider moves** apply as exact deltas, never re-derived from measured occupancy —
-  occupancy swings by a whole chunk (21 ms) between reads, so comparing it against a band
-  either ignores small moves or chases its own read granularity.
-- **Drift** is corrected against a one-second *average* occupancy, which is the only place
-  a tolerance band is meaningful.
+The two ends are clocked by different crystals — the system mixer on one side, the USB
+DAC or Bluetooth stack on the other — and a few dozen ppm is enough to drift a two-hour
+film out of sync if nothing closes the loop. Three separate mechanisms, because the three
+problems have different shapes:
+
+- **Slider moves** apply as exact deltas — silence written to the output, or audio
+  skipped from the ring — and shift the drift reference by exactly the same amount, so a
+  slider move is never mistaken for drift.
+- **Drift** is judged only on the ring's *average* fill over 10-second windows, never on
+  single readings: fill swings by tens of ms on every A2DP burst and capture chunk.
+  Outside a 15 ms band it is corrected by resampling a chunk by one or two frames (a 0.1%
+  speed change for 21 ms), never by cutting samples out, which clicks.
+- **Real breaks** — fill 200 ms off from where it belongs, either way — are fixed in one
+  step: the excess cut, or a drained delay put back as silence, so sync is right
+  immediately.
 
 | Path | What's in it |
 | --- | --- |
-| `audio/AudioSpec.kt` | PCM format and the control-loop constants, with their invariants |
+| `audio/AudioSpec.kt` | PCM format and the sync constants, with the reasoning behind each |
 | `audio/PcmRing.kt` | Ring buffer between the two audio threads |
-| `audio/MirrorEngine.kt` | Capture → delay → gain → routed output. The core. |
+| `audio/Pcm.kt` | Peak, gain, and the one-frame stretch used for drift correction |
+| `audio/MirrorEngine.kt` | Capture → ring → delay → gain → routed output. The core. |
 | `audio/OutputDevices.kt` | Device enumeration and labelling |
 | `audio/ToneTester.kt` | The dual-tone routing test and the un-pinned probe |
 | `MirrorService.kt` | Foreground service owning the MediaProjection |
 | `MirrorState.kt` | StateFlow shared service → UI |
 | `MainActivity.kt` | The single screen |
 
-`MIN_CUSHION_MS > DRIFT_TOLERANCE_MS > one CHUNK_BYTES` is an invariant, not a
-coincidence. If the floor and the band are equal, an empty ring sits exactly on the band's
-low edge and the loop accepts zero occupancy as converged.
+Every `MirrorEngine` log line tagged `DIAG` is diagnostics only and never feeds back into
+the audio. `adb logcat -s MirrorEngine` gives one line per second covering capture
+(platform backlog), the ring (fill, overflow), sync (drift, corrections, resyncs) and
+output (underruns), all logged from the playback thread so capture never waits on logd.
 
 </details>

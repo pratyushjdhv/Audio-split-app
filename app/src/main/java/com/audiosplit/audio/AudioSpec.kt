@@ -22,56 +22,65 @@ object AudioSpec {
 
     const val MAX_DELAY_MS = 400
 
-    /**
-     * How long the source may be silent before the capture stream is reopened on resume.
-     * After a gap this long the existing stream frequently comes back delivering badly —
-     * late, bursty, and dropping — and nothing done to the samples afterwards recovers it.
-     * Reopening does, which is exactly what stopping and restarting the mirror by hand was
-     * doing.
-     *
-     * Short, because switching apps can hand over in well under a second and still leave
-     * the stream sick. There is no cost to being eager: while a video is playing the
-     * source holds its session continuously and feeds us zeros through quiet passages, so
-     * no data at all means no app is playing — never merely a quiet moment.
-     */
-    const val STALE_AFTER_IDLE_MS = 500
-
-    /**
-     * A second oversized lag correction within this window means skipping isn't working
-     * and the stream itself is the problem, so it gets reopened instead.
-     */
-    const val REPEAT_SKIP_WINDOW_MS = 5000
-
     /** Routing only settles once audio has actually been flowing for a while. */
     const val ROUTING_SETTLE_MS = 400
 
     /**
-     * How often the accumulated lag is evaluated. Short, because this is the delay between
-     * a resume going wrong and the mirror putting it right — a full second of it is most
-     * of what gets noticed.
+     * Size of the app-side ring between the capture and playback threads. This is where
+     * the delay and any Bluetooth burstiness live — NOT in the platform capture buffer,
+     * which Android fixes at its minimum (about 64 ms) for playback capture no matter what
+     * size is requested, and which drops audio the moment it fills. Has to hold the
+     * largest delay plus the resync threshold plus a burst, with room to spare.
      */
-    const val BACKLOG_CHECK_MS = 250
+    const val RING_CAPACITY_MS = 2000
 
     /**
-     * Lag beyond this is shed in one jump. Only for real breaks — a pause/resume, a seek —
-     * where the alternative is half a minute of visibly wrong sync. A cut is the lesser
-     * evil at this size; below it, MICRO_CORRECT_MS does the work inaudibly.
+     * How long the playback thread waits for a chunk before giving up for this round. Only
+     * reached if capture itself stalls; normally a chunk lands every ~21 ms.
      */
-    const val BACKLOG_RESYNC_MS = 150
+    const val RING_WAIT_MS = 200L
 
     /**
-     * Lag below this is left alone. Above it, the mirror trims MICRO_CORRECT_MS per check
-     * until it is back to zero.
+     * Drift is judged on the ring's AVERAGE fill over this long, never on single readings.
+     * Bluetooth drains in bursts and capture arrives in chunks, so instantaneous fill swings
+     * by tens of ms all the time; reacting to that is what made every earlier corrector
+     * audible. Real clock drift is tens of ppm — under 1 ms per 10 s — so a long window
+     * loses nothing.
      */
-    const val MICRO_DEADBAND_MS = 8
+    const val DRIFT_WINDOW_MS = 10_000L
+
+    /** Ignore the start-up transient before taking the reference fill level. */
+    const val DRIFT_SETTLE_MS = 2_000L
 
     /**
-     * How much the mirror may shave off per check to hold sync. At one millisecond per
-     * 250 ms this is a 0.4% rate change, which is below the threshold of hearing — the
-     * point of correcting continuously instead of waiting for the error to grow big enough
-     * to need a jump you would notice.
+     * Average fill may wander this far from the reference before it is corrected. Well
+     * above the noise left in a 10 s average, well below anything audible as lip sync.
      */
-    const val MICRO_CORRECT_MS = 1
+    const val DRIFT_TOLERANCE_MS = 15
+
+    /**
+     * Most frames one chunk may be stretched or squeezed by when correcting drift. One
+     * frame over a 1024-frame chunk is a 0.1% speed change for 21 ms (under 2 cents) —
+     * inaudible, unlike cutting samples out. Two keeps up with even a badly matched clock.
+     */
+    const val MAX_STRETCH_FRAMES = 2
+
+    /**
+     * Fill this far from where it should be is not drift but a real break. Too much (an
+     * output stall, a burst after a hiccup) is cut in one go; too little (capture stalled
+     * and the delay drained away) is put back as silence in one go. Either way sync is right
+     * now rather than after minutes of stretching. Large on purpose: a false trigger is an
+     * audible cut or gap, and Bluetooth bursts alone swing the fill by tens of ms.
+     */
+    const val RESYNC_MS = 200
+
+    /**
+     * Continuous digital silence for this long means nothing is coming through. Capture
+     * never goes quiet by returning no data — Android feeds exact zeros in real time when
+     * nothing is playing — so silence is the only signal there is. Films have quiet
+     * passages, but almost never exact zeros for this long.
+     */
+    const val SILENCE_REPORT_MS = 1500L
 
     fun msToBytes(ms: Int): Int {
         val frames = (SAMPLE_RATE.toLong() * ms / 1000L).toInt()

@@ -16,18 +16,19 @@ data class MirrorStatus(
     val actualLabel: String? = null,
     val level: Float = 0f,
     val error: String? = null,
-    /** Captured audio minus elapsed time over the last window; positive means a backlog. */
-    val excessMs: Int = 0,
-    /** How many times the mirror has skipped forward to shed a backlog. */
+    /** How far the mirror's buffered audio had drifted from where it belongs, last check. */
+    val driftMs: Int = 0,
+    /** Times the mirror snapped back into sync after a real break (a cut, or silence put back). */
     val resyncs: Int = 0,
     /** Audio still queued in the output stack; -1 when the device won't report it. */
     val outputLatencyMs: Int = -1,
-    /** Inaudible 1 ms trims made to hold sync. */
-    val microTrims: Int = 0,
-    /** Times the capture stream was reopened after a gap. */
-    val restarts: Int = 0,
-    /** True when some app is actually feeding us audio, silent or not. */
-    val receivingData: Boolean = false,
+    /** Frames stretched or squeezed, a sample at a time, to hold sync. */
+    val corrections: Int = 0,
+    /**
+     * Nothing but digital silence for a while: nothing is playing, or the app playing
+     * blocks capture. The capture stream can't tell those two apart.
+     */
+    val silent: Boolean = false,
 )
 
 /**
@@ -45,7 +46,9 @@ object MirrorState {
     val status: StateFlow<MirrorStatus> = _status.asStateFlow()
 
     fun started(targetLabel: String) {
-        _status.value = MirrorStatus(running = true, targetLabel = targetLabel)
+        // Silent until the first real sample arrives, so a mirror started before the video
+        // never claims to be receiving audio.
+        _status.value = MirrorStatus(running = true, targetLabel = targetLabel, silent = true)
     }
 
     fun stopped() {
@@ -61,27 +64,24 @@ object MirrorState {
         }
     }
 
-    fun sync(excessMs: Int, resyncs: Int, outputLatencyMs: Int, microTrims: Int) {
+    fun sync(driftMs: Int, resyncs: Int, outputLatencyMs: Int, corrections: Int) {
         _status.update {
             it.copy(
-                excessMs = excessMs,
+                driftMs = driftMs,
                 resyncs = resyncs,
                 outputLatencyMs = outputLatencyMs,
-                microTrims = microTrims,
+                corrections = corrections,
             )
         }
     }
 
-    fun restarted(restarts: Int) {
-        _status.update { it.copy(restarts = restarts) }
-    }
-
     fun level(peak: Float) {
-        _status.update { it.copy(level = peak, receivingData = true) }
+        // Only real audio ends the silent state; a quiet reading during it changes nothing.
+        _status.update { it.copy(level = peak, silent = it.silent && peak <= 0f) }
     }
 
-    fun idle() {
-        _status.update { it.copy(level = 0f, receivingData = false) }
+    fun silence() {
+        _status.update { it.copy(level = 0f, silent = true) }
     }
 
     fun error(message: String?) {
