@@ -1,3 +1,4 @@
 <resources>
     <string name="app_name">AudioSplit</string>
+    <string name="tile_label">AudioSplit</string>
 </resources>

@@ -10,7 +10,15 @@ import kotlinx.coroutines.flow.update
 enum class RoutingVerdict { UNKNOWN, HONORED, OVERRIDDEN }
 
 data class MirrorStatus(
+    /** A session exists: the service is up and holds the capture permission. */
     val running: Boolean = false,
+    /**
+     * The session is held but nothing is being copied. The capture permission is kept, so
+     * resuming needs no consent dialog; a fresh start always does.
+     */
+    val paused: Boolean = false,
+    /** AudioDeviceInfo id the session copies to; -1 when there is no session. */
+    val targetId: Int = -1,
     val targetLabel: String? = null,
     val verdict: RoutingVerdict = RoutingVerdict.UNKNOWN,
     val actualLabel: String? = null,
@@ -29,7 +37,10 @@ data class MirrorStatus(
      * blocks capture. The capture stream can't tell those two apart.
      */
     val silent: Boolean = false,
-)
+) {
+    /** Audio is actually being copied right now. */
+    val sharing: Boolean get() = running && !paused
+}
 
 /**
  * Single source of truth shared between the foreground service (which owns the audio)
@@ -45,14 +56,36 @@ object MirrorState {
     private val _status = MutableStateFlow(MirrorStatus())
     val status: StateFlow<MirrorStatus> = _status.asStateFlow()
 
-    fun started(targetLabel: String) {
+    fun started(targetId: Int, targetLabel: String) {
         // Silent until the first real sample arrives, so a mirror started before the video
         // never claims to be receiving audio.
-        _status.value = MirrorStatus(running = true, targetLabel = targetLabel, silent = true)
+        _status.value = MirrorStatus(
+            running = true,
+            targetId = targetId,
+            targetLabel = targetLabel,
+            silent = true,
+        )
     }
 
     fun stopped() {
-        _status.update { it.copy(running = false, level = 0f) }
+        _status.update { it.copy(running = false, paused = false, level = 0f) }
+    }
+
+    fun paused() {
+        _status.update { it.copy(paused = true, level = 0f) }
+    }
+
+    fun resumed() {
+        // A fresh engine reports routing and sync from scratch, and routing only once, so
+        // anything left over from before the pause would be stale for good.
+        _status.update {
+            MirrorStatus(
+                running = true,
+                targetId = it.targetId,
+                targetLabel = it.targetLabel,
+                silent = true,
+            )
+        }
     }
 
     fun routing(honored: Boolean, actual: OutputDevice?) {

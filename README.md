@@ -22,7 +22,8 @@ You need three things plugged in and working:
 
 ### Step 1 — Pick where the second copy goes
 
-Open AudioSplit. You'll see a list of every output the tablet can see.
+Open AudioSplit. Under **Headphones → Send a copy to** you'll see every output the tablet
+can see.
 
 **Pick the pair that is NOT currently getting sound.**
 
@@ -32,14 +33,15 @@ sends everything there; AudioSplit copies the sound to the *other* one. So:
 - If your video is already coming out of the **Bluetooth** headphones → pick the **wired** one
 - If your video is already coming out of the **wired** earphones → pick the **Bluetooth** one
 
-Not sure which? Step 2 tells you — it prints "your apps currently play to: …". Pick the
-other one.
+Not sure which? Just above the list, **Your video plays to** shows where the sound is going
+right now. Pick the other one. If you pick the same one, the app warns you.
 
 ---
 
 ### Step 2 — Test that your tablet can actually do this (do this once)
 
-Tap **Test both outputs (6s)**.
+In the **One-time check** card, tap **Play test tones (6 s)**. (Once it has passed, the test
+moves into **Advanced** so it stays out of your way.)
 
 You should hear, at the same time:
 
@@ -51,14 +53,9 @@ You should hear, at the same time:
 **Two different tones in two different ears = it works.** You're good forever; you never
 need to run this again.
 
-The app also prints a line saying **"your apps currently play to: …"**. That's where your
-video's sound is going right now. It should be the *other* pair — not the one you picked.
-If it names the same one you picked, the app will warn you, and you should pick the other
-output instead.
-
-**If both tones come out of the same ear**, or you see the word `OVERRIDDEN` in red, your
-tablet's software is refusing to send audio to two places at once. Nothing in the app can
-fix that — see [If the test fails](#if-the-test-fails) below.
+**If both tones come out of the same ear**, or a line in red says the sound "went to"
+somewhere else, your tablet's software is refusing to send audio to two places at once.
+Nothing in the app can fix that — see [If the test fails](#if-the-test-fails) below.
 
 ---
 
@@ -89,9 +86,9 @@ Both people should now hear the film.
 Bluetooth is slower than a wire — sound reaches Bluetooth ears roughly a fifth of a second
 late. The delay slider holds the mirrored copy back so the two line up.
 
-**Drag the "Delay on the mirrored side" slider until you both hear the same thing at the
-same moment.** It updates live while the film plays, so just nudge it until it sounds
-right.
+**Adjust "Delay on the copy" until you both hear the same thing at the same moment.** Drag
+the slider for big moves and tap **−** / **+** for 5 ms nudges. It updates live while the
+film plays, so just nudge it until it sounds right.
 
 Where to start depends on which pair you're mirroring to:
 
@@ -100,17 +97,36 @@ Where to start depends on which pair you're mirroring to:
 | The **wired** earphones | **180 ms** — the Bluetooth side is already running late, so the wired copy waits for it |
 | The **Bluetooth** headphones | **0 ms** — Bluetooth is already the slow one; adding more would make it worse |
 
-The slider only needs setting once per pair of headphones — the app remembers it.
+The delay only needs setting once per pair of headphones — the app remembers it for each
+pair separately.
 
-There's also a **volume slider** for the mirrored side. Use it if one of you needs it
-louder than the other. (The tablet's volume buttons move *both* pairs together, which is
-why this exists separately.)
+There's also a **Copy volume** slider. Use it if one of you needs it louder than the
+other. (The tablet's volume buttons move *both* pairs together, which is why this exists
+separately.)
+
+---
+
+### Pausing, and controlling it without opening the app
+
+- **Pause** stops the copy but keeps the session. **Resume** picks up straight away, with no
+  permission prompt.
+- The **notification** has **Pause/Resume** and **Stop** buttons, so you never have to leave
+  your video.
+- Add the **AudioSplit Quick Settings tile** (Advanced → **Add to Quick Settings**, or drag it
+  in from the Quick Settings edit screen). Then, from the pull-down shade:
+  - when sharing is off, tap it and the screen-capture prompt appears over your video;
+    accept it and sharing starts
+  - when sharing, tap it to pause; tap again to resume
+  - long-press it to open the app
+
+Android asks for screen-capture permission every time a new session starts, and no app can
+skip that. Pausing instead of stopping avoids it.
 
 ---
 
 ### When you're done
 
-Tap **Stop sharing**, or hit **Stop** on the notification.
+Tap **Stop**, either in the app or on the notification.
 
 ---
 
@@ -119,9 +135,9 @@ Tap **Stop sharing**, or hit **Stop** on the notification.
 | What you see | What it means |
 | --- | --- |
 | The level bar is flat while a video plays | That app blocks audio copying. Netflix, Prime Video and Disney+ all do this on purpose and there's no way around it. Use the browser, Stremio, or a local file. |
-| Sound is out of sync | Drag the delay slider (Step 5). |
+| Sound is out of sync | Adjust the delay (Step 5). |
 | One side is too quiet | Use the volume slider, not the volume buttons. |
-| Red `OVERRIDDEN` message | Your tablet refused to split the audio. See below. |
+| Red "sent the copy to … instead" message | Your tablet refused to split the audio. See below. |
 | Both tones in the same ear during the test | Same thing — see below. |
 | Second pair went silent mid-film | Check the dongle didn't get knocked loose, then Stop and Start again. |
 
@@ -258,10 +274,17 @@ problems have different shapes:
 | `audio/Pcm.kt` | Peak, gain, and the one-frame stretch used for drift correction |
 | `audio/MirrorEngine.kt` | Capture → ring → delay → gain → routed output. The core. |
 | `audio/OutputDevices.kt` | Device enumeration and labelling |
-| `audio/ToneTester.kt` | The dual-tone routing test and the un-pinned probe |
-| `MirrorService.kt` | Foreground service owning the MediaProjection |
-| `MirrorState.kt` | StateFlow shared service → UI |
-| `MainActivity.kt` | The single screen |
+| `audio/DefaultOutput.kt` | Finds where the source app's audio is going right now |
+| `audio/ToneTester.kt` | The dual-tone routing test |
+| `MirrorService.kt` | Foreground service owning the MediaProjection; start, pause, resume, stop |
+| `MirrorNotification.kt` | The notification and its Pause/Resume and Stop buttons |
+| `MirrorTileService.kt` | The Quick Settings tile |
+| `StartMirrorActivity.kt` | Invisible activity that shows the consent prompt when the tile starts a session |
+| `MirrorLauncher.kt` | The one start path, shared by the screen and the tile |
+| `MirrorSettings.kt` | Saved settings, per-pair delays, and which device the copy goes to |
+| `MirrorState.kt` | StateFlow shared service → UI and tile |
+| `MirrorViewModel.kt` | State for the screen |
+| `ui/MirrorScreen.kt` | The single screen |
 
 Every `MirrorEngine` log line tagged `DIAG` is diagnostics only and never feeds back into
 the audio. `adb logcat -s MirrorEngine` gives one line per second covering capture

@@ -21,6 +21,13 @@ data class OutputDevice(
     /** True for the things you'd actually put in your ears. */
     val isHeadphoneLike: Boolean
         get() = type in OutputDevices.HEADPHONE_TYPES
+
+    /** Bluetooth is the slow side: a fifth of a second or so behind a wire. */
+    val isBluetooth: Boolean
+        get() = type in OutputDevices.BLUETOOTH_TYPES
+
+    val isWired: Boolean
+        get() = type in OutputDevices.WIRED_TYPES
 }
 
 object OutputDevices {
@@ -33,6 +40,18 @@ object OutputDevices {
         AudioDeviceInfo.TYPE_USB_ACCESSORY,
         AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,
         AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
+    )
+
+    val BLUETOOTH_TYPES = setOf(
+        AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,
+        AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
+    )
+
+    val WIRED_TYPES = setOf(
+        AudioDeviceInfo.TYPE_USB_HEADSET,
+        AudioDeviceInfo.TYPE_USB_DEVICE,
+        AudioDeviceInfo.TYPE_WIRED_HEADSET,
+        AudioDeviceInfo.TYPE_WIRED_HEADPHONES,
     )
 
     /** Devices worth offering as a mirror target. Excludes HDMI, telephony, etc. */

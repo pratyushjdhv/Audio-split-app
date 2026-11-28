@@ -1,4 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <style name="Theme.AudioSplit" parent="android:Theme.Material.NoActionBar" />
+
+    <!-- StartMirrorActivity: no window of its own, so the consent dialog sits over the video. -->
+    <style name="Theme.AudioSplit.Transparent" parent="android:Theme.Translucent.NoTitleBar" />
 </resources>

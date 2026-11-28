@@ -1,650 +1,119 @@
 package com.audiosplit
 
-import android.Manifest
+import android.app.Activity
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
-import android.media.AudioDeviceCallback
-import android.media.AudioDeviceInfo
-import android.media.AudioManager
-import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
-import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import android.provider.Settings
-import com.audiosplit.audio.AudioSpec
-import com.audiosplit.audio.DefaultOutput
+import androidx.lifecycle.viewmodel.compose.viewModel
 import com.audiosplit.audio.OutputDevice
-import com.audiosplit.audio.OutputDevices
-import com.audiosplit.audio.ToneTester
 import com.audiosplit.ui.AudioSplitTheme
-import com.audiosplit.ui.DeviceRow
-import com.audiosplit.ui.LabelledSlider
-import com.audiosplit.ui.LevelMeter
-import com.audiosplit.ui.SectionCard
-import kotlin.math.roundToInt
+import com.audiosplit.ui.MirrorActions
+import com.audiosplit.ui.MirrorScreen
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
             AudioSplitTheme {
-                Surface(
-                    Modifier.fillMaxSize(),
-                    color = MaterialTheme.colorScheme.background,
-                ) {
-                    MirrorScreen()
+                Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+                    MirrorRoute()
                 }
             }
         }
     }
 }
 
-private const val PREFS = "audiosplit"
-private const val KEY_DEVICE = "device_id"
-private const val KEY_DEVICE_TYPE = "device_type"
-private const val KEY_DEVICE_ADDRESS = "device_address"
-private const val KEY_USER_CHOSE = "device_user_chose"
-private const val KEY_DELAY = "delay_ms"
-private const val KEY_GAIN = "gain"
-private const val KEY_AUTO_SYNC = "auto_sync"
-private const val KEY_LOW_LATENCY = "low_latency"
-private const val TONE_DURATION_MS = 6000
-
+/** Connects the screen to the view model, the service and the two system dialogs. */
 @Composable
-private fun MirrorScreen() {
+private fun MirrorRoute(viewModel: MirrorViewModel = viewModel()) {
     val context = LocalContext.current
-    val prefs = remember { context.getSharedPreferences(PREFS, Context.MODE_PRIVATE) }
-    val status by MirrorState.status.collectAsStateWithLifecycle()
+    val state by viewModel.uiState.collectAsStateWithLifecycle()
 
-    var devices by remember { mutableStateOf(OutputDevices.list(context)) }
-    var selectedId by remember { mutableIntStateOf(prefs.getInt(KEY_DEVICE, -1)) }
-    var delayMs by remember {
-        mutableFloatStateOf(
-            prefs.getInt(KEY_DELAY, 180).coerceIn(0, AudioSpec.MAX_DELAY_MS).toFloat()
-        )
-    }
-    var gain by remember { mutableFloatStateOf(prefs.getFloat(KEY_GAIN, 1f)) }
-    var autoSync by remember { mutableStateOf(prefs.getBoolean(KEY_AUTO_SYNC, true)) }
-    var lowLatency by remember { mutableStateOf(prefs.getBoolean(KEY_LOW_LATENCY, false)) }
-    var primary by remember { mutableStateOf<OutputDevice?>(null) }
-    var detecting by remember { mutableStateOf(false) }
-    var toneResults by remember { mutableStateOf<List<ToneTester.Result>>(emptyList()) }
-    var toneRunning by remember { mutableStateOf(false) }
-    var micGranted by remember {
-        mutableStateOf(
-            context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
-        )
-    }
-    var pendingStart by remember { mutableStateOf(false) }
-
-    // Keep the list live so plugging the dongle in mid-session just works.
-    DisposableEffect(Unit) {
-        val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        val callback = object : AudioDeviceCallback() {
-            override fun onAudioDevicesAdded(added: Array<out AudioDeviceInfo>?) {
-                devices = OutputDevices.list(context)
-            }
-
-            override fun onAudioDevicesRemoved(removed: Array<out AudioDeviceInfo>?) {
-                devices = OutputDevices.list(context)
-            }
-        }
-        am.registerAudioDeviceCallback(callback, null)
-        onDispose {
-            am.unregisterAudioDeviceCallback(callback)
-            ToneTester.stop()
-        }
-    }
-
-    // Default to the wired pair if we can spot one — that's the mirror target in the
-    // common case, since Bluetooth already owns the system default.
-    //
-    // Never runs while mirroring: moving the selection underneath a running mirror would
-    // disable its Stop button. And an explicit pick is never overridden — the earlier
-    // version re-applied the wired preference on every device-list change, which silently
-    // undid a deliberate choice of the Bluetooth side every time the mirror stopped.
-    LaunchedEffect(devices, status.running) {
-        if (status.running || devices.isEmpty()) return@LaunchedEffect
-
-        // AudioDeviceInfo ids are handed out per connection and are not stable across
-        // reboots or replugs, so a bare saved id can resolve to a completely different
-        // device. Match on what actually identifies the hardware.
-        val savedType = prefs.getInt(KEY_DEVICE_TYPE, -1)
-        val savedAddress = prefs.getString(KEY_DEVICE_ADDRESS, "").orEmpty()
-        val userChose = prefs.getBoolean(KEY_USER_CHOSE, false)
-        val current = devices.firstOrNull { it.id == selectedId }
-        val byIdentity = devices.firstOrNull {
-            savedType != -1 && it.type == savedType &&
-                (savedAddress.isEmpty() || it.address == savedAddress)
-        }
-
-        val resolved = when {
-            // An explicit pick stands for as long as that device is around...
-            userChose && current != null -> current.id
-            // ...and is re-found by identity after a replug or reboot renumbered it.
-            userChose && byIdentity != null -> byIdentity.id
-            else -> devices.firstOrNull { it.type in WIRED_TYPES }?.id
-                ?: current?.id
-                ?: byIdentity?.id
-                ?: devices.firstOrNull { it.isHeadphoneLike }?.id
-                ?: -1
-        }
-
-        if (resolved != selectedId) {
-            selectedId = resolved
-            // Record what we landed on for identity matching, but don't promote an
-            // automatic pick into a user choice.
-            devices.firstOrNull { it.id == resolved }?.let { persistDevice(prefs, it, userChose) }
-        }
-    }
-
-    val projectionManager = remember {
-        context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-    }
-    val projectionLauncher = rememberLauncherForActivityResult(
+    val consent = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
-        val data: Intent? = result.data
-        if (result.resultCode == android.app.Activity.RESULT_OK && data != null) {
-            MirrorService.start(
-                context, result.resultCode, data, selectedId,
-                delayMs.roundToInt(), gain, autoSync, lowLatency,
-            )
+        val data = result.data
+        if (result.resultCode == Activity.RESULT_OK && data != null) {
+            MirrorLauncher.start(context, result.resultCode, data, viewModel.uiState.value.selected)
         } else {
-            MirrorState.error("Capture permission was declined, so there's nothing to mirror.")
+            MirrorState.error("Capture permission was declined, so there's nothing to copy.")
         }
     }
 
-    val permissionLauncher = rememberLauncherForActivityResult(
+    val permissions = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
-    ) { result ->
-        micGranted = result[Manifest.permission.RECORD_AUDIO] ?: micGranted
-        if (pendingStart) {
-            pendingStart = false
-            if (micGranted) {
-                projectionLauncher.launch(projectionManager.createScreenCaptureIntent())
-            } else {
-                MirrorState.error(
-                    "AudioSplit needs the microphone permission. Android gates audio capture " +
-                        "behind it even though the mic itself is never opened."
-                )
-            }
-        }
-    }
-
-    fun persistTuning() {
-        prefs.edit()
-            .putInt(KEY_DELAY, delayMs.roundToInt())
-            .putFloat(KEY_GAIN, gain)
-            .putBoolean(KEY_AUTO_SYNC, autoSync)
-            .putBoolean(KEY_LOW_LATENCY, lowLatency)
-            .apply()
-    }
-
-    LaunchedEffect(delayMs, gain, autoSync, status.running) {
-        if (!status.running) return@LaunchedEffect
-        kotlinx.coroutines.delay(50)
-        MirrorService.update(context, delayMs.roundToInt(), gain, autoSync)
-    }
-
-    // Runs while mirroring too. Skipping it there meant the screen said "couldn't tell"
-    // when it had simply never looked.
-    var probed by remember { mutableStateOf(false) }
-    LaunchedEffect(devices, status.running) {
-        detecting = true
-        DefaultOutput.detect { primary = it; detecting = false; probed = true }
-    }
-
-    LaunchedEffect(toneRunning) {
-        if (toneRunning) {
-            kotlinx.coroutines.delay(TONE_DURATION_MS + 300L)
-            toneRunning = false
-        }
-    }
-
-    val selected = devices.firstOrNull { it.id == selectedId }
-
-    Column(
-        Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(20.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        Text("AudioSplit", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-        Text(
-            "Play one thing, hear it on two headphones. Start whatever you're watching " +
-                "in its own app, then mirror the sound to the second pair.",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-
-        StatusCard(status)
-
-        SectionCard("Step 1 — the two outputs") {
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(Modifier.weight(1f)) {
-                    Text("Your player plays to", style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text(
-                        when {
-                            primary != null -> primary!!.label
-                            detecting -> "checking…"
-                            probed -> "couldn't tell — this device won't say"
-                            else -> "checking…"
-                        },
-                        style = MaterialTheme.typography.bodyLarge,
-                    )
-                }
-                OutlinedButton(
-                    onClick = {
-                        // Only the system switcher can move another app's audio; no API
-                        // lets us do it on their behalf. The output-switcher action isn't
-                        // in the SDK, so try it by name and fall back to sound settings.
-                        val panels = listOf(
-                            "android.settings.MEDIA_OUTPUT",
-                            Settings.Panel.ACTION_VOLUME,
-                            Settings.ACTION_SOUND_SETTINGS,
-                        )
-                        panels.firstOrNull { action ->
-                            runCatching { context.startActivity(Intent(action)) }.isSuccess
-                        }
-                    },
-                    enabled = !status.running,
-                ) {
-                    Text("Change")
-                }
-            }
-
-            Text(
-                "Mirror the copy to",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            if (devices.isEmpty()) {
-                Text("No outputs found. Plug in the dongle and connect the Bluetooth headset.")
-            }
-            devices.forEach { device ->
-                DeviceRow(
-                    label = device.label,
-                    detail = "id ${device.id}" + if (device.address.isNotEmpty()) " · ${device.address}" else "",
-                    selected = device.id == selectedId,
-                    enabled = !status.running,
-                    onSelect = {
-                        selectedId = device.id
-                        persistDevice(prefs, device, userChose = true)
-                    },
-                )
-            }
-
-            val collision = primary != null && primary!!.id == selectedId
-            val mirrorIsSlow = devices.firstOrNull { it.id == selectedId }?.type in BLUETOOTH_TYPES
-            val primaryIsSlow = primary?.type in BLUETOOTH_TYPES
-            when {
-                collision -> Text(
-                    "Both copies would go to this one pair, and the other person would hear " +
-                        "nothing. Pick the other output.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error,
-                )
-
-                mirrorIsSlow && !primaryIsSlow -> Text(
-                    "Heads up: you're mirroring to the Bluetooth pair, which is the slower " +
-                        "one. The delay slider can only ADD delay, so it can't pull them " +
-                        "back into line. Better to tap Change above, send your player to " +
-                        "the Bluetooth pair instead, and mirror to the wired one — the " +
-                        "player shifts its own picture to match Bluetooth, which we can't " +
-                        "do for it.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.secondary,
-                )
-
-                primary != null -> Text(
-                    "Good: your player drives the slower pair and shifts its own picture to " +
-                        "match, and the mirror is on the faster one where the delay slider " +
-                        "can line it up.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        }
-
-        SectionCard("Step 2 — check this device can do it") {
-            Text(
-                "Plays a low tone to the selected output and a high tone to the other " +
-                    "headphones at the same time. Two different tones in two different ears " +
-                    "means it works.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            OutlinedButton(
-                onClick = {
-                    if (toneRunning) {
-                        ToneTester.stop()
-                        toneRunning = false
-                    } else {
-                        val target = selectedId.let { OutputDevices.find(context, it) }
-                        val other = devices.firstOrNull { it.id != selectedId && it.isHeadphoneLike }
-                            ?.let { OutputDevices.find(context, it.id) }
-                        if (target == null) {
-                            MirrorState.error("Choose an output first.")
-                        } else {
-                            toneResults = emptyList()
-                            toneRunning = true
-                            val pairs = buildList {
-                                add(target to 440.0)
-                                if (other != null) add(other to 880.0)
-                            }
-                            ToneTester.start(pairs, durationMs = TONE_DURATION_MS) { results ->
-                                toneResults = results
-                            }
-                        }
-                    }
-                },
-                enabled = !status.running,
-            ) {
-                Text(if (toneRunning) "Stop tones" else "Test both outputs (6s)")
-            }
-            toneResults.filter { !it.isDefaultProbe }.forEach { result ->
-                val verdict = when {
-                    result.honored -> "routed correctly"
-                    result.routedTo == null -> "no routing reported"
-                    else -> "OVERRIDDEN → went to ${result.routedTo.label}"
-                }
-                Text(
-                    "${result.requested?.label}: $verdict",
-                    style = MaterialTheme.typography.bodySmall,
-                    fontFamily = FontFamily.Monospace,
-                    color = if (result.honored) MaterialTheme.colorScheme.primary
-                    else MaterialTheme.colorScheme.error,
-                )
-            }
-            // Per-track routing working is only half the question. The source app plays to
-            // the system default, so if that default IS the mirror target, both copies land
-            // in the same ears and the other person hears nothing.
-            toneResults.firstOrNull { it.isDefaultProbe }?.let { probe ->
-                val collides = probe.routedTo != null && probe.routedTo.id == selectedId
-                Text(
-                    "your apps currently play to: ${probe.routedTo?.label ?: "unknown"}",
-                    style = MaterialTheme.typography.bodySmall,
-                    fontFamily = FontFamily.Monospace,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                if (collides) {
-                    Text(
-                        "That is the same output you picked to mirror to, so both copies " +
-                            "would go to one pair of headphones. Pick the other output.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.error,
-                    )
-                }
-            }
-        }
-
-        SectionCard("Step 3 — tune it while it plays") {
-            LabelledSlider(
-                label = "Delay on the mirrored side",
-                value = delayMs,
-                valueText = "${delayMs.roundToInt()} ms",
-                range = 0f..AudioSpec.MAX_DELAY_MS.toFloat(),
-                steps = (AudioSpec.MAX_DELAY_MS / 5) - 1,
-                hint = "Nudge this until you both hear the same moment. Mirroring to the " +
-                    "wired pair usually needs 150-250 ms; mirroring to Bluetooth usually " +
-                    "needs 0.",
-                onChange = { delayMs = it },
-                onChangeFinished = ::persistTuning,
-            )
-            LabelledSlider(
-                label = "Volume of the mirrored side",
-                value = gain,
-                valueText = "${(gain * 100).roundToInt()}%",
-                range = 0f..2f,
-                steps = 39,
-                hint = "Separate from the volume buttons, which move both headphones at once.",
-                onChange = { gain = it },
-                onChangeFinished = ::persistTuning,
-            )
-
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(Modifier.weight(1f)) {
-                    Text("Hold the sync automatically", style = MaterialTheme.typography.bodyMedium)
-                    Text(
-                        "Keeps the delay you set by ear in place over a long film. Checks " +
-                            "every 10 seconds and corrects by stretching the sound a sample " +
-                            "at a time, which you can't hear. Turn it off and the mirror is " +
-                            "a plain copy that may slowly drift out of sync.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                Switch(
-                    checked = autoSync,
-                    onCheckedChange = { autoSync = it; persistTuning() },
-                )
-            }
-
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(Modifier.weight(1f)) {
-                    Text("Shortest possible delay", style = MaterialTheme.typography.bodyMedium)
-                    Text(
-                        "Use when the mirrored pair is the one running LATE and the slider " +
-                            "can't help, because it only ever adds. Cuts the mirror's own " +
-                            "buffering to the minimum. May stutter on Bluetooth — if it " +
-                            "does, turn it back off. Takes effect next time you start.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                Switch(
-                    checked = lowLatency,
-                    enabled = !status.running,
-                    onCheckedChange = { lowLatency = it; persistTuning() },
-                )
-            }
-        }
-
-        Row(
-            Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Button(
-                onClick = {
-                    if (status.running) {
-                        MirrorService.stop(context)
-                    } else {
-                        ToneTester.stop()
-                        toneRunning = false
-                        val needed = buildList {
-                            if (!micGranted) add(Manifest.permission.RECORD_AUDIO)
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-                                context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
-                                PackageManager.PERMISSION_GRANTED
-                            ) {
-                                add(Manifest.permission.POST_NOTIFICATIONS)
-                            }
-                        }
-                        if (needed.isEmpty()) {
-                            projectionLauncher.launch(projectionManager.createScreenCaptureIntent())
-                        } else {
-                            // The projection prompt has to wait until the permission dialog
-                            // is gone, or the second dialog never appears.
-                            pendingStart = true
-                            permissionLauncher.launch(needed.toTypedArray())
-                        }
-                    }
-                },
-                // Must stay enabled while running: if the dongle is pulled mid-movie the
-                // selected device disappears, and a disabled Stop leaves a mirror that
-                // can only be killed from the notification.
-                enabled = status.running || selected != null,
-                modifier = Modifier.widthIn(min = 160.dp),
-                colors = ButtonDefaults.buttonColors(),
-            ) {
-                Text(if (status.running) "Stop sharing" else "Start sharing")
-            }
-            Text(
-                if (selected != null) "→ ${selected.label}" else "No output selected",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-
-        Text(
-            "Android asks for screen-capture permission because that's the same permission " +
-                "that covers capturing audio. Nothing on screen is recorded or leaves the device.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        Spacer(Modifier.height(24.dp))
-    }
-}
-
-@Composable
-private fun StatusCard(status: MirrorStatus) {
-    SectionCard(if (status.running) "Sharing" else "Not sharing") {
-        if (status.running) {
-            Text(
-                "Mirroring to ${status.targetLabel}",
-                style = MaterialTheme.typography.bodyLarge,
-            )
-            when (status.verdict) {
-                RoutingVerdict.HONORED -> Text(
-                    "Routing confirmed by the system.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.primary,
-                )
-
-                RoutingVerdict.OVERRIDDEN -> Text(
-                    "This device ignored the request and sent the copy to " +
-                        "${status.actualLabel}. Both people are hearing the same output — " +
-                        "per-track routing is blocked here.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error,
-                )
-
-                RoutingVerdict.UNKNOWN -> Text(
-                    "Waiting for the system to report where the audio went…",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            LevelMeter(level = status.level, active = true)
-
-            // Sync diagnostics. Worth surfacing because the failure modes look identical
-            // from the sofa but have different causes: a jump in "resynced" is the mirror
-            // recovering from a real break, while "drift" is the slow clock mismatch the
-            // sample-at-a-time corrections are holding in check.
-            Text(
-                buildString {
-                    append("in output: ")
-                    append(if (status.outputLatencyMs < 0) "n/a" else "${status.outputLatencyMs} ms")
-                    append("   ·   drift: ${status.driftMs} ms")
-                    append("   ·   corrected: ${status.corrections * 1000 / AudioSpec.SAMPLE_RATE} ms")
-                    append("   ·   resynced: ${status.resyncs}x")
-                },
-                style = MaterialTheme.typography.bodySmall,
-                fontFamily = FontFamily.Monospace,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Text(
-                // Android hands the mirror exact zeros both when nothing is playing and
-                // when the playing app blocks capture, so the screen can't tell those
-                // apart and mustn't pretend to.
-                if (status.silent) {
-                    "Nothing is coming through. Either nothing is playing yet — start your " +
-                        "video and this picks it up on its own — or the app you're using " +
-                        "blocks audio copying (Netflix, Prime and Disney+ do). Browsers, " +
-                        "Stremio and local files work."
-                } else {
-                    "Receiving audio."
-                },
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+        // The consent dialog has to wait until this one is gone, or it never appears.
+        if (MirrorLauncher.canCapture(context)) {
+            consent.launch(MirrorLauncher.captureIntent(context))
         } else {
-            Text(
-                "Start playback in the other app first, then come back and hit start.",
-                style = MaterialTheme.typography.bodyMedium,
-            )
-        }
-        status.error?.let {
-            Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+            MirrorState.error(MirrorLauncher.MIC_NEEDED)
         }
     }
+
+    val actions = remember(viewModel, context, consent, permissions) {
+        object : MirrorActions {
+            override fun start() {
+                viewModel.stopToneTest()
+                val missing = MirrorLauncher.missingPermissions(context)
+                if (missing.isEmpty()) {
+                    consent.launch(MirrorLauncher.captureIntent(context))
+                } else {
+                    permissions.launch(missing.toTypedArray())
+                }
+            }
+
+            override fun pause() = MirrorService.pause(context)
+            override fun resume() = MirrorService.resume(context)
+            override fun stop() = MirrorService.stop(context)
+            override fun dismissError() = MirrorState.error(null)
+            override fun changePlayingNow() = openOutputSwitcher(context)
+            override fun selectDevice(device: OutputDevice) = viewModel.selectDevice(device)
+            override fun setDelay(delayMs: Int) = viewModel.setDelay(delayMs)
+            override fun nudgeDelay(byMs: Int) = viewModel.nudgeDelay(byMs)
+            override fun saveDelay() = viewModel.saveDelay()
+            override fun setGain(gain: Float) = viewModel.setGain(gain)
+            override fun saveGain() = viewModel.saveGain()
+            override fun setAutoSync(on: Boolean) = viewModel.setAutoSync(on)
+            override fun setLowLatency(on: Boolean) = viewModel.setLowLatency(on)
+            override fun toggleToneTest() = viewModel.toggleToneTest()
+            override fun addTile() = MirrorTileService.requestAdd(context)
+        }
+    }
+
+    MirrorScreen(
+        state = state,
+        actions = actions,
+        canAddTile = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU,
+    )
 }
 
-private fun persistDevice(
-    prefs: android.content.SharedPreferences,
-    device: OutputDevice,
-    userChose: Boolean,
-) {
-    prefs.edit()
-        .putInt(KEY_DEVICE, device.id)
-        .putInt(KEY_DEVICE_TYPE, device.type)
-        .putString(KEY_DEVICE_ADDRESS, device.address)
-        .putBoolean(KEY_USER_CHOSE, userChose)
-        .apply()
+/**
+ * Only the system switcher can move another app's audio; no API lets us do it on their
+ * behalf. The output-switcher action isn't in the SDK, so try it by name and fall back to
+ * the volume panel, then sound settings.
+ */
+private fun openOutputSwitcher(context: Context) {
+    listOf(
+        "android.settings.MEDIA_OUTPUT",
+        Settings.Panel.ACTION_VOLUME,
+        Settings.ACTION_SOUND_SETTINGS,
+    ).firstOrNull { action ->
+        runCatching { context.startActivity(Intent(action)) }.isSuccess
+    }
 }
-
-private val BLUETOOTH_TYPES = setOf(
-    AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,
-    AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
-)
-
-private val WIRED_TYPES = setOf(
-    AudioDeviceInfo.TYPE_USB_HEADSET,
-    AudioDeviceInfo.TYPE_USB_DEVICE,
-    AudioDeviceInfo.TYPE_WIRED_HEADSET,
-    AudioDeviceInfo.TYPE_WIRED_HEADPHONES,
-)
